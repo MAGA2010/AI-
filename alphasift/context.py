@@ -36,6 +36,7 @@ def build_llm_context(
     context_files: list[str | Path] | None = None,
     candidate_context_files: list[str | Path] | None = None,
     candidate_context_rows: list[dict[str, object]] | None = None,
+    market_news_text: str = "",
     snapshot_df: pd.DataFrame | None = None,
     candidate_df: pd.DataFrame | None = None,
     event_profile: dict[str, object] | None = None,
@@ -45,6 +46,9 @@ def build_llm_context(
     sections: list[str] = []
     if base_context.strip():
         sections.append("【人工上下文】\n" + base_context.strip())
+
+    if market_news_text.strip():
+        sections.append("【市场资讯】\n" + market_news_text.strip())
 
     file_context = _read_context_files(context_files or [])
     if file_context:

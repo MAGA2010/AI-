@@ -9,8 +9,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_POST_ANALYZERS = ["scorecard"]
 DEFAULT_LLM_MODEL = "gemini/gemini-2.5-flash"
-DEFAULT_SNAPSHOT_SOURCE_PRIORITY = ["efinance", "akshare_em", "em_datacenter"]
-TUSHARE_FIRST_SOURCE_PRIORITY = ["tushare", "efinance", "akshare_em", "em_datacenter"]
+DEFAULT_SNAPSHOT_SOURCE_PRIORITY = ["baostock", "akshare_sina", "efinance", "akshare_em", "em_datacenter"]
+TUSHARE_FIRST_SOURCE_PRIORITY = ["tushare", "baostock", "akshare_sina", "efinance", "akshare_em", "em_datacenter"]
 
 
 def _load_env_file() -> None:
@@ -182,6 +182,13 @@ class Config:
     evaluation_price_path_enabled: bool = False
     evaluation_price_path_lookback_days: int = 90
 
+    # Market-wide news for LLM context.
+    market_news_enabled: bool = False
+    market_news_providers: list[str] = field(default_factory=lambda: ["headlines", "policy", "activity"])
+    market_news_max_chars: int = 800
+    market_news_cache_enabled: bool = True
+    market_news_cache_ttl_hours: int = 4
+
     # Data directory
     data_dir: Path = _PROJECT_ROOT / "data"
 
@@ -280,6 +287,11 @@ class Config:
                 30,
                 int(os.getenv("EVALUATION_PRICE_PATH_LOOKBACK_DAYS", "90")),
             ),
+            market_news_enabled=_parse_bool_env("MARKET_NEWS_ENABLED", False),
+            market_news_providers=_parse_csv_env("MARKET_NEWS_PROVIDERS", ["headlines", "policy", "activity"]),
+            market_news_max_chars=max(100, int(os.getenv("MARKET_NEWS_MAX_CHARS", "800"))),
+            market_news_cache_enabled=_parse_bool_env("MARKET_NEWS_CACHE_ENABLED", True),
+            market_news_cache_ttl_hours=max(1, int(os.getenv("MARKET_NEWS_CACHE_TTL_HOURS", "4"))),
             data_dir=Path(os.getenv("ALPHASIFT_DATA_DIR", str(_PROJECT_ROOT / "data"))),
         )
 

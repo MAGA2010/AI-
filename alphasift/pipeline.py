@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Main pipeline — orchestrates L1 → L2 → result."""
+"""Main pipeline — orchestrates L1 → L2 → result.
+
+集成 V2 全维度评分引擎，覆盖全部34条策略规则。
+"""
 
 import logging
 import re
@@ -14,13 +17,17 @@ from alphasift.context import build_llm_context
 from alphasift.daily import enrich_daily_features
 from alphasift.filter import apply_hard_filters, requires_daily_features, without_daily_filters
 from alphasift.industry import enrich_industry_concepts
+from alphasift.market_news import collect_market_news
 from alphasift.models import Pick, ScreenResult
+from alphasift.moat_scorer import MoatScorer, _build_moat_config
 from alphasift.post_analysis import normalize_post_analyzers, run_post_analyzers
 from alphasift.ranker import rank_candidates_with_metadata
 from alphasift.risk import apply_portfolio_overlay, apply_risk_overlay
 from alphasift.scorer import compute_screen_scores, factor_score_columns
+from alphasift.scorer_v2 import compute_industry_pe_averages, generate_signals, score_snapshot, suggest_position
 from alphasift.snapshot import fetch_snapshot_with_fallback
-from alphasift.strategy import load_all_strategies
+from alphasift.strategy import load_all_strategies, load_strategy_raw
+from alphasift.track_analyzer import TrackAnalyzer, _build_track_analyzer_config
 
 logger = logging.getLogger(__name__)
 
@@ -49,29 +56,16 @@ def screen(
 ) -> ScreenResult:
     """Execute stock screening with the given strategy.
 
-    Args:
-        strategy: Strategy name (matches a YAML file in strategies/).
-        market: Market scope, currently only "cn".
-        max_output: Override max output count from strategy.
-        use_llm: Whether to use LLM for L2 ranking.
-        llm_context: Optional market/news/theme context supplied to the LLM ranker.
-        llm_context_files: Optional text files appended to LLM context.
-        candidate_context_files: Optional CSV/JSON/JSONL files keyed by code with candidate-level context.
-        collect_llm_candidate_context: Whether to fetch Top-K candidate news/fund-flow context for LLM.
-        candidate_context_max_candidates: Max candidates to fetch external context for.
-        candidate_context_providers: Optional provider names: news, fund_flow, announcement.
-        industry_map_files: Optional code->industry/concepts files used before L1/L2.
-        industry_provider: Optional provider for board mapping, e.g. "akshare".
-        post_analyzers: Optional L3 analyzers, e.g. ["scorecard", "dsa"].
-        post_analysis_max_picks: Override max number of picks sent to post analyzers.
-        daily_enrich: Whether to enrich shortlisted candidates with daily K-line features.
-        daily_enrich_max_candidates: Max candidates to enrich after snapshot filtering.
-        deep_analysis: Backward-compatible alias for post_analyzers=["dsa"].
-        deep_analysis_max_picks: Backward-compatible max-picks alias for DSA.
-        config: Runtime config. Defaults to Config.from_env().
-
-    Returns:
-        ScreenResult with ranked picks.
+    Pipeline:
+      1. Load strategy YAML
+      2. Fetch snapshot data
+      3. L1 hard filter
+      4. L1.5 V2 全维度评分（#1-34 全部条件）
+      5. L2 LLM ranking (optional)
+      6. Risk overlay
+      7. Portfolio overlay
+      8. Generate buy/sell signals
+      9. Output
     """
     if config is None:
         config = Config.from_env()
@@ -82,7 +76,7 @@ def screen(
     run_id = uuid.uuid4().hex[:12]
     degradation: list[str] = []
 
-    # 1. Load strategy
+    # ── 1. Load strategy ─────────────────────────────────────
     strategies = load_all_strategies(config.strategies_dir)
     if strategy not in strategies:
         available = ", ".join(strategies.keys()) or "(none)"
@@ -101,16 +95,13 @@ def screen(
     )
     if deep_analysis and "dsa" not in analyzer_names:
         analyzer_names.append("dsa")
-    analyzer_max_picks = (
-        post_analysis_max_picks
-        or deep_analysis_max_picks
-    )
+    analyzer_max_picks = post_analysis_max_picks or deep_analysis_max_picks
     daily_needed = requires_daily_features(screening.hard_filters)
     daily_requested = config.daily_enrich_enabled if daily_enrich is None else daily_enrich
     daily_limit = daily_enrich_max_candidates or config.daily_enrich_max_candidates
     snapshot_filters = without_daily_filters(screening.hard_filters) if daily_needed else screening.hard_filters
 
-    # 2. Fetch snapshot
+    # ── 2. Fetch snapshot ────────────────────────────────────
     snapshot_df = fetch_snapshot_with_fallback(
         config.snapshot_source_priority,
         required_columns=_required_snapshot_columns(snapshot_filters),
@@ -139,8 +130,7 @@ def screen(
     source_errors = [str(item) for item in snapshot_df.attrs.get("source_errors", [])]
     degradation.extend(f"Snapshot source fallback: {item}" for item in source_errors)
 
-    # 3. L1 hard filter. If a strategy needs daily features, first apply only
-    # snapshot-safe filters, then enrich a narrowed candidate pool.
+    # ── 3. L1 hard filter ────────────────────────────────────
     df = apply_hard_filters(snapshot_df, snapshot_filters)
     after_filter_count = len(df)
 
@@ -162,6 +152,7 @@ def screen(
             portfolio_diversity_enabled=config.portfolio_diversity_enabled,
         )
 
+    # Daily K-line enrichment
     daily_enriched = False
     daily_enrich_count = 0
     if daily_needed or daily_requested:
@@ -219,11 +210,51 @@ def screen(
             portfolio_diversity_enabled=config.portfolio_diversity_enabled,
         )
 
-    # 4. Compute screen_score
+    # ── 4. Compute L1 screen_score ───────────────────────────
     df = compute_screen_scores(df, screening)
     df = df.sort_values("screen_score", ascending=False)
 
-    # 5. Take Top K for LLM ranking
+    # ── 4.5 V2 全维度评分（#1-34 全部条件）──────────────────
+    # 加载策略原始 dict 用于 V2 评分
+    try:
+        raw_strategy = load_strategy_raw(strategy, config.strategies_dir)
+    except Exception:
+        raw_strategy = {}
+
+    # 初始化赛道分析器和壁垒评分器
+    track_cfg = _build_track_analyzer_config(raw_strategy)
+    track_analyzer = TrackAnalyzer(track_cfg)
+    moat_cfg = _build_moat_config(raw_strategy)
+    moat_scorer = MoatScorer(moat_cfg)
+
+    # 计算行业平均PE（用于规则#23/#24相对估值判断）
+    snap_dicts = [row.to_dict() for _, row in df.iterrows()]
+    industry_pe_avg = compute_industry_pe_averages(snap_dicts)
+
+    # 对每条候选执行 V2 评分（委托 TrackAnalyzer/MoatScorer，传入行业PE均值）
+    v2_scores = []
+    for snap_dict in snap_dicts:
+        ind = str(snap_dict.get("industry", "")).strip()
+        pe_avg = industry_pe_avg.get(ind)
+        v2_score, v2_components, v2_meta = score_snapshot(
+            raw_strategy, snap_dict,
+            track_analyzer=track_analyzer,
+            moat_scorer=moat_scorer,
+            industry_pe_avg=pe_avg,
+        )
+        v2_scores.append({
+            "v2_score": v2_score,
+            "v2_components": v2_components,
+            "v2_meta": v2_meta,
+        })
+
+    # 将 V2 评分结果合并回 DataFrame
+    df["v2_score"] = [s["v2_score"] for s in v2_scores]
+    # 合并 V1 screen_score 和 V2 score（取加权平均）
+    df["screen_score"] = df["screen_score"] * 0.3 + df["v2_score"] * 0.7
+    df = df.sort_values("screen_score", ascending=False)
+
+    # ── 5. Take Top K for LLM ranking ───────────────────────
     top_k = min(
         max(output_count * config.llm_candidate_multiplier, output_count),
         config.llm_max_candidates,
@@ -231,10 +262,10 @@ def screen(
     )
     df_top = df.head(top_k)
 
-    # 6. Build Pick list
-    picks = _df_to_picks(df_top)
+    # ── 6. Build Pick list（含 V2 评分字段）──────────────────
+    picks = _df_to_picks(df_top, v2_scores[:top_k], raw_strategy)
 
-    # 7. L2 LLM ranking
+    # ── 7. L2 LLM ranking ───────────────────────────────────
     llm_ranked = False
     llm_market_view = ""
     llm_selection_logic = ""
@@ -282,11 +313,32 @@ def screen(
                     else ""
                 )
                 degradation.append(f"Candidate context row errors: {sample}{suffix}")
+        # Collect market-wide news if enabled
+        market_news_text = ""
+        if config.market_news_enabled:
+            try:
+                market_news_text = collect_market_news(
+                    providers=config.market_news_providers,
+                    max_chars=config.market_news_max_chars,
+                    cache_dir=(
+                        config.data_dir / "market_news"
+                        if config.market_news_cache_enabled
+                        else None
+                    ),
+                    cache_ttl_hours=config.market_news_cache_ttl_hours,
+                )
+                if market_news_text:
+                    degradation.append(
+                        f"Market news collected: {len(market_news_text)} chars"
+                    )
+            except Exception as exc:
+                degradation.append(f"Market news fetch skipped: {exc}")
         effective_context = build_llm_context(
             base_context=llm_context if llm_context is not None else config.llm_context,
             context_files=llm_context_files,
             candidate_context_files=candidate_context_files,
             candidate_context_rows=candidate_context_rows,
+            market_news_text=market_news_text,
             snapshot_df=snapshot_df,
             candidate_df=df_top,
             event_profile=screening.event_profile,
@@ -329,7 +381,7 @@ def screen(
             p.rank = i + 1
             p.final_score = p.screen_score
 
-    # 8. Independent risk overlay
+    # ── 8. Risk overlay ─────────────────────────────────────
     if config.risk_enabled:
         picks, risk_degradation = apply_risk_overlay(
             picks,
@@ -339,8 +391,7 @@ def screen(
         )
         degradation.extend(risk_degradation)
 
-    # 9. LLM-driven portfolio overlay. This runs before trimming so an
-    # over-crowded sector can make room for a comparable candidate elsewhere.
+    # ── 9. Portfolio overlay ────────────────────────────────
     portfolio_concentration_notes: list[str] = []
     if config.portfolio_diversity_enabled:
         picks, portfolio_concentration_notes = apply_portfolio_overlay(
@@ -350,10 +401,10 @@ def screen(
             profile=screening.portfolio_profile,
         )
 
-    # 10. Trim to max_output
+    # ── 10. Trim to max_output ──────────────────────────────
     picks = picks[:output_count]
 
-    # 11. Optional L3 post-analysis, DSA is only one possible analyzer.
+    # ── 11. Optional L3 post-analysis ───────────────────────
     if analyzer_names:
         picks, post_degradation = run_post_analyzers(
             picks,
@@ -393,8 +444,16 @@ def screen(
     )
 
 
-def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
-    """Convert DataFrame rows to Pick objects."""
+# ═══════════════════════════════════════════════════════════════
+#  DataFrame → Pick 转换（含 V2 字段）
+# ═══════════════════════════════════════════════════════════════
+
+def _df_to_picks(
+    df: pd.DataFrame,
+    v2_scores: list[dict] | None = None,
+    raw_strategy: dict | None = None,
+) -> list[Pick]:
+    """Convert DataFrame rows to Pick objects, including V2 scoring fields."""
     picks = []
     factor_cols = factor_score_columns()
     for i, (_, row) in enumerate(df.iterrows()):
@@ -403,6 +462,20 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             for factor, col in factor_cols.items()
             if col in df.columns
         }
+
+        # V2 评分数据
+        v2 = v2_scores[i] if v2_scores and i < len(v2_scores) else None
+        v2_score = v2["v2_score"] if v2 else 0.0
+        v2_components = v2["v2_components"] if v2 else {}
+        v2_meta = v2["v2_meta"] if v2 else {}
+
+        # 生成买卖信号
+        snap_dict = row.to_dict()
+        signals = generate_signals(raw_strategy or {}, snap_dict, v2_score) if raw_strategy else {}
+
+        # 仓位建议
+        position_pct = suggest_position(raw_strategy or {}, v2_score) if raw_strategy else 0.0
+
         picks.append(Pick(
             rank=i + 1,
             code=_normalize_code(row.get("code", row.get("代码", ""))),
@@ -444,9 +517,32 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             pullback_to_ma20_pct=_safe_float(row.get("pullback_to_ma20_pct")),
             consolidation_days_20d=_safe_int(row.get("consolidation_days_20d")),
             factor_scores=factor_scores,
+            # ── V2 新增字段 ──
+            track_policy_score=v2_components.get("policy_orientation"),
+            track_cycle_score=v2_components.get("industry_cycle"),
+            track_supply_demand_score=v2_components.get("supply_demand"),
+            track_prosperity_score=v2_components.get("prosperity"),
+            moat_score=v2_components.get("competitive_moat"),
+            financial_health_score=v2_components.get("financial_health"),
+            management_score=v2_components.get("management_quality"),
+            buy_condition_fundamental=v2_components.get("buy_fundamental"),
+            buy_condition_technical=v2_components.get("buy_technical"),
+            buy_condition_capital=v2_components.get("buy_capital"),
+            buy_condition_event=v2_components.get("buy_event"),
+            buy_condition_valuation=v2_components.get("buy_valuation"),
+            buy_condition_sentiment=v2_components.get("buy_sentiment"),
+            buy_signal=signals.get("buy_signal", "neutral"),
+            sell_signals=signals.get("sell_signals", []),
+            suggested_position_pct=position_pct,
+            stop_loss_price=signals.get("stop_loss_price"),
+            stop_profit_price=signals.get("stop_profit_price"),
         ))
     return picks
 
+
+# ═══════════════════════════════════════════════════════════════
+#  辅助函数
+# ═══════════════════════════════════════════════════════════════
 
 def _required_snapshot_columns(filters) -> list[str]:
     columns: list[str] = []

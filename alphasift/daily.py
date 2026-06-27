@@ -14,6 +14,7 @@ _DAILY_FEATURE_DEFAULTS = {
     "ma5": pd.NA,
     "ma20": pd.NA,
     "ma60": pd.NA,
+    "ma250": pd.NA,
     "ma_bullish": pd.NA,
     "price_above_ma20": pd.NA,
     "macd_status": "",
@@ -24,6 +25,7 @@ _DAILY_FEATURE_DEFAULTS = {
     "range_20d_pct": pd.NA,
     "breakout_20d_pct": pd.NA,
     "volume_ratio_20d": pd.NA,
+    "volume_surge_3d_pct": pd.NA,
     "body_pct": pd.NA,
     "pullback_to_ma20_pct": pd.NA,
     "consolidation_days_20d": pd.NA,
@@ -195,10 +197,12 @@ def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
     ma5 = close.rolling(5).mean()
     ma20 = close.rolling(20).mean()
     ma60 = close.rolling(60).mean()
+    ma250 = close.rolling(250).mean() if len(close) >= 250 else pd.Series(dtype=float)
     last_close = float(close.iloc[-1])
     last_ma5 = _last_float(ma5)
     last_ma20 = _last_float(ma20)
     last_ma60 = _last_float(ma60)
+    last_ma250 = _last_float(ma250) if len(close) >= 250 else None
     shape = _compute_shape_features(df, last_close=last_close, last_ma20=last_ma20)
 
     lookback_idx = max(0, len(close) - 61)
@@ -225,6 +229,7 @@ def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
         "ma5": last_ma5,
         "ma20": last_ma20,
         "ma60": last_ma60,
+        "ma250": last_ma250,
         "ma_bullish": ma_bullish,
         "price_above_ma20": price_above_ma20,
         "macd_status": macd_status,
@@ -292,6 +297,7 @@ def _compute_shape_features(
         "range_20d_pct": _round_or_none(range_20d_pct),
         "breakout_20d_pct": _round_or_none(breakout_20d_pct),
         "volume_ratio_20d": _round_or_none(volume_ratio_20d),
+        "volume_surge_3d_pct": _round_or_none(_volume_surge_3d(df)),
         "body_pct": _round_or_none(body_pct),
         "pullback_to_ma20_pct": _round_or_none(pullback_to_ma20_pct),
         "consolidation_days_20d": _consolidation_days(previous),
@@ -331,6 +337,24 @@ def _volume_ratio_20d(df: pd.DataFrame) -> float | None:
     if base <= 0:
         return None
     return float(volume.iloc[-1]) / base
+
+
+def _volume_surge_3d(df: pd.DataFrame) -> float | None:
+    """3-day average volume surge vs prior 20-day average, as percentage.
+
+    Returns (avg_3d / avg_20d - 1) * 100, or None if insufficient data.
+    """
+    if "volume" not in df.columns or len(df) < 24:
+        return None
+    volume = pd.to_numeric(df["volume"], errors="coerce").dropna()
+    if len(volume) < 24:
+        return None
+    recent_3 = volume.tail(3)
+    prior_20 = volume.iloc[-23:-3]
+    base = float(prior_20.mean())
+    if base <= 0:
+        return None
+    return (float(recent_3.mean()) / base - 1.0) * 100
 
 
 def _consolidation_days(previous: pd.DataFrame, *, max_range_pct: float = 12.0) -> int | None:

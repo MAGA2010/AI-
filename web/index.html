@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AlphaSift - AI 智能选股</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#0f1117;min-height:100vh;color:#e1e4e8}
+.container{max-width:1440px;margin:0 auto;padding:16px}
+header{text-align:center;padding:20px 0 10px}
+header h1{font-size:2em;background:linear-gradient(90deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+header p{color:#8b949e;margin-top:4px}
+.top-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center;margin:16px 0}
+select,button,input[type=text]{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:8px;padding:10px 16px;font-size:14px;outline:none}
+select:focus,input:focus{border-color:#58a6ff}
+button{background:linear-gradient(135deg,#238636,#2ea043);color:#fff;border:none;cursor:pointer;font-weight:600;transition:all .2s}
+button:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(46,160,67,.3)}
+button:disabled{opacity:.5;cursor:not-allowed;transform:none}
+button.secondary{background:#21262d;color:#c9d1d9;border:1px solid #30363d}
+.grid{display:grid;grid-template-columns:1fr 360px;gap:16px;margin-top:16px}
+@media(max-width:960px){.grid{grid-template-columns:1fr}}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px}
+.card h2{font-size:1.1em;color:#58a6ff;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.card h2 .icon{font-size:1.2em}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px;margin-bottom:16px}
+.stat{background:#0d1117;border-radius:8px;padding:12px;text-align:center}
+.stat .val{font-size:1.5em;font-weight:700;color:#58a6ff}
+.stat .lbl{font-size:.75em;color:#8b949e;margin-top:2px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#0d1117;color:#8b949e;font-weight:600;text-align:left;padding:10px 8px;position:sticky;top:0;z-index:1}
+td{padding:8px;border-bottom:1px solid #21262d}
+tr:hover td{background:#1c2128}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge-buy{background:#238636;color:#fff}
+.badge-sell{background:#da3633;color:#fff}
+.badge-neutral{background:#30363d;color:#8b949e}
+.badge-strong-buy{background:#2ea043;color:#fff;box-shadow:0 0 8px rgba(46,160,67,.4)}
+.score-bar{height:6px;background:#21262d;border-radius:3px;overflow:hidden;width:60px;display:inline-block;vertical-align:middle}
+.score-fill{height:100%;border-radius:3px;transition:width .5s}
+.risk-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+.risk-low{background:#2ea043}.risk-medium{background:#d29922}.risk-high{background:#da3633}
+.news-item{padding:10px 0;border-bottom:1px solid #21262d;font-size:13px;line-height:1.5}
+.news-item:last-child{border:none}
+.news-tag{font-size:11px;color:#58a6ff;font-weight:600}
+.detail-panel{display:none;position:fixed;top:0;right:0;width:480px;height:100vh;background:#161b22;border-left:1px solid #30363d;z-index:100;overflow-y:auto;padding:24px;box-shadow:-8px 0 30px rgba(0,0,0,.5)}
+.detail-panel.open{display:block}
+.detail-panel .close{position:absolute;top:16px;right:16px;background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer}
+.detail-panel h3{color:#58a6ff;font-size:1.2em;margin-bottom:16px}
+.detail-row{display:flex;justify-content:space-between;padding:6px 0;font-size:13px}
+.detail-row .label{color:#8b949e}
+.detail-row .value{color:#e1e4e8;font-weight:500}
+.detail-section{margin-top:16px;padding-top:12px;border-top:1px solid #21262d}
+.detail-section h4{color:#bc8cff;font-size:.95em;margin-bottom:8px}
+.thesis-text{font-size:13px;line-height:1.6;color:#c9d1d9;background:#0d1117;padding:12px;border-radius:8px;margin-top:8px}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid #30363d;border-top-color:#58a6ff;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.status-msg{text-align:center;padding:40px;color:#8b949e;font-size:14px}
+.footer{text-align:center;padding:20px;color:#484f58;font-size:12px}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🔭 AlphaSift</h1>
+    <p>AI 智能选股 — 全维度策略评分 + LLM 深度分析</p>
+  </header>
+
+  <div class="top-bar">
+    <select id="strategySelect"></select>
+    <button id="runBtn" onclick="runScreen(false)">🚀 开始选股</button>
+    <button id="fastBtn" class="secondary" onclick="runScreen(true)">⚡ 快速模式</button>
+    <button class="secondary" onclick="loadNews()">📰 刷新资讯</button>
+  </div>
+
+  <div class="stats" id="statsRow" style="display:none">
+    <div class="stat"><div class="val" id="stSnap">-</div><div class="lbl">全市场</div></div>
+    <div class="stat"><div class="val" id="stFilter">-</div><div class="lbl">过滤后</div></div>
+    <div class="stat"><div class="val" id="stPick">-</div><div class="lbl">输出</div></div>
+    <div class="stat"><div class="val" id="stLLM">-</div><div class="lbl">LLM排序</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2><span class="icon">📊</span> 选股结果</h2>
+      <div id="resultArea"><div class="status-msg">选择策略后点击「开始选股」</div></div>
+    </div>
+    <div>
+      <div class="card" style="margin-bottom:16px">
+        <h2><span class="icon">📰</span> 市场资讯</h2>
+        <div id="newsArea"><div class="status-msg">加载中...</div></div>
+      </div>
+      <div class="card">
+        <h2><span class="icon">🤖</span> LLM 市场观点</h2>
+        <div id="llmView" class="thesis-text" style="min-height:60px">等待选股结果...</div>
+      </div>
+    </div>
+  </div>
+  <div class="footer">AlphaSift — 基于 AI 的自动选股系统 · 仅供学习研究</div>
+</div>
+
+<div class="detail-panel" id="detailPanel">
+  <button class="close" onclick="closeDetail()">&times;</button>
+  <div id="detailContent"></div>
+</div>
+
+<script>
+const API = '';
+let allPicks = [];
+
+// Load strategies on startup
+fetch(API + '/api/strategies').then(r => r.json()).then(d => {
+  const sel = document.getElementById('strategySelect');
+  d.strategies.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.name;
+    opt.textContent = `${s.display_name} (${s.category})`;
+    if (s.name === 'full_spectrum_v2') opt.selected = true;
+    sel.appendChild(opt);
+  });
+});
+
+// Load market news
+function loadNews() {
+  document.getElementById('newsArea').innerHTML = '<div class="status-msg"><span class="spinner"></span> 获取市场资讯...</div>';
+  fetch(API + '/api/market-news').then(r => r.json()).then(d => {
+    const area = document.getElementById('newsArea');
+    if (!d.text) { area.innerHTML = '<div class="status-msg">暂无资讯</div>'; return; }
+    const sections = d.text.split('\n').filter(s => s.trim());
+    area.innerHTML = sections.map(s => {
+      const parts = s.split('】');
+      const tag = parts[0] ? parts[0].replace('【', '') : '';
+      const content = parts.slice(1).join('】');
+      const items = content.split(' | ').slice(0, 6);
+      return `<div style="margin-bottom:12px"><span class="news-tag">${tag}</span>${items.map(i => `<div class="news-item">${i}</div>`).join('')}</div>`;
+    }).join('');
+  }).catch(() => {
+    document.getElementById('newsArea').innerHTML = '<div class="status-msg">资讯获取失败</div>';
+  });
+}
+loadNews();
+
+// Run screening
+async function runScreen(fast = false) {
+  const btn = fast ? document.getElementById('fastBtn') : document.getElementById('runBtn');
+  const strategy = document.getElementById('strategySelect').value;
+  btn.disabled = true;
+  const origText = btn.innerHTML;
+  btn.innerHTML = '<span class="spinner"></span> ' + (fast ? '快速分析中...' : 'AI 分析中...');
+  document.getElementById('resultArea').innerHTML = '<div class="status-msg"><span class="spinner"></span> ' + (fast ? '量化评分中，约5秒...' : '获取数据 → 评分 → LLM 排序中...<br><small>可能需要30-60秒</small>') + '</div>';
+
+  try {
+    const resp = await fetch(API + '/api/screen', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({strategy, use_llm: !fast, fast_mode: fast, max_output: 10})
+    });
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.detail || 'Screening failed');
+
+    allPicks = data.picks;
+    renderResults(data);
+    document.getElementById('llmView').textContent = data.llm_market_view || '无 LLM 市场观点';
+  } catch (e) {
+    document.getElementById('resultArea').innerHTML = `<div class="status-msg" style="color:#da3633">❌ ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origText;
+  }
+}
+
+function renderResults(data) {
+  document.getElementById('statsRow').style.display = 'grid';
+  document.getElementById('stSnap').textContent = data.snapshot_count;
+  document.getElementById('stFilter').textContent = data.after_filter_count;
+  document.getElementById('stPick').textContent = data.pick_count;
+  document.getElementById('stLLM').textContent = data.llm_ranked ? '✅' : '❌';
+
+  const rows = data.picks.map(p => {
+    const signalClass = p.buy_signal?.includes('buy') ? 'badge-buy' : p.buy_signal?.includes('sell') ? 'badge-sell' : 'badge-neutral';
+    const signalText = {'strong_buy':'强买','buy':'买入','neutral':'观望','sell':'卖出','strong_sell':'强卖'}[p.buy_signal] || p.buy_signal;
+    const scoreColor = p.final_score >= 60 ? '#2ea043' : p.final_score >= 40 ? '#d29922' : '#da3633';
+    const riskClass = {'low':'risk-low','medium':'risk-medium','high':'risk-high','critical':'risk-high'}[p.risk_level] || '';
+    const llm = p.llm_score ? `${p.llm_score}` : '-';
+    const conf = p.llm_confidence ? `${Math.round(p.llm_confidence*100)}%` : '-';
+    const mv = p.total_mv ? (p.total_mv / 1e8).toFixed(0) + '亿' : '-';
+    const pos = p.suggested_position_pct ? p.suggested_position_pct.toFixed(0) + '%' : '-';
+
+    return `<tr onclick="showDetail(${p.rank-1})" style="cursor:pointer">
+      <td><strong>${p.rank}</strong></td>
+      <td><strong>${p.code}</strong></td>
+      <td>${p.name}</td>
+      <td>${p.price?.toFixed(2) || '-'}</td>
+      <td style="color:${p.change_pct>=0?'#da3633':'#2ea043'}">${p.change_pct?.toFixed(2) || '-'}%</td>
+      <td><span class="score-bar"><span class="score-fill" style="width:${p.final_score}%;background:${scoreColor}"></span></span> ${p.final_score.toFixed(1)}</td>
+      <td>${llm}</td>
+      <td>${conf}</td>
+      <td><span class="badge ${signalClass}">${signalText}</span></td>
+      <td>${pos}</td>
+      <td>${mv}</td>
+      <td><span class="risk-dot ${riskClass}"></span>${p.risk_level||'-'}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('resultArea').innerHTML = `<div style="overflow-x:auto"><table>
+    <thead><tr><th>#</th><th>代码</th><th>名称</th><th>价格</th><th>涨跌</th><th>综合分</th><th>LLM</th><th>置信</th><th>信号</th><th>仓位</th><th>市值</th><th>风险</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+function showDetail(idx) {
+  const p = allPicks[idx];
+  if (!p) return;
+  const panel = document.getElementById('detailPanel');
+  const pos = p.suggested_position_pct ? p.suggested_position_pct.toFixed(1) + '%' : '-';
+  const mv = p.total_mv ? (p.total_mv / 1e8).toFixed(0) + '亿' : '-';
+  const c60 = p.change_60d ? p.change_60d.toFixed(1) + '%' : '-';
+
+  document.getElementById('detailContent').innerHTML = `
+    <h3>${p.code} ${p.name}</h3>
+    <div class="detail-row"><span class="label">价格</span><span class="value">${p.price?.toFixed(2)||'-'}</span></div>
+    <div class="detail-row"><span class="label">涨跌</span><span class="value">${p.change_pct?.toFixed(2)||'-'}%</span></div>
+    <div class="detail-row"><span class="label">60日涨跌</span><span class="value">${c60}</span></div>
+    <div class="detail-row"><span class="label">PE / PB</span><span class="value">${p.pe_ratio?.toFixed(1)||'-'} / ${p.pb_ratio?.toFixed(2)||'-'}</span></div>
+    <div class="detail-row"><span class="label">市值</span><span class="value">${mv}</span></div>
+    <div class="detail-row"><span class="label">行业</span><span class="value">${p.industry||'-'}</span></div>
+    <div class="detail-row"><span class="label">概念</span><span class="value">${p.concepts||'-'}</span></div>
+    <div class="detail-row"><span class="label">换手率</span><span class="value">${p.turnover_rate?.toFixed(1)||'-'}%</span></div>
+    <div class="detail-row"><span class="label">量比</span><span class="value">${p.volume_ratio?.toFixed(2)||'-'}</span></div>
+
+    <div class="detail-section">
+      <h4>📊 评分详情</h4>
+      <div class="detail-row"><span class="label">综合评分</span><span class="value" style="color:#58a6ff;font-size:1.1em">${p.final_score.toFixed(1)}</span></div>
+      <div class="detail-row"><span class="label">量化评分</span><span class="value">${p.screen_score.toFixed(1)}</span></div>
+      <div class="detail-row"><span class="label">LLM评分</span><span class="value">${p.llm_score||'-'}</span></div>
+      <div class="detail-row"><span class="label">LLM置信度</span><span class="value">${p.llm_confidence?Math.round(p.llm_confidence*100)+'%':'-'}</span></div>
+      <div class="detail-row"><span class="label">政策赛道分</span><span class="value">${p.track_policy_score?.toFixed(1)||'-'}</span></div>
+      <div class="detail-row"><span class="label">竞争壁垒分</span><span class="value">${p.moat_score?.toFixed(1)||'-'}</span></div>
+      <div class="detail-row"><span class="label">财务健康分</span><span class="value">${p.financial_health_score?.toFixed(1)||'-'}</span></div>
+      <div class="detail-row"><span class="label">基本面改善</span><span class="value">${p.buy_condition_fundamental?.toFixed(1)||'-'}</span></div>
+      <div class="detail-row"><span class="label">技术面信号</span><span class="value">${p.buy_condition_technical?.toFixed(1)||'-'}</span></div>
+      <div class="detail-row"><span class="label">估值安全边际</span><span class="value">${p.buy_condition_valuation?.toFixed(1)||'-'}</span></div>
+    </div>
+
+    <div class="detail-section">
+      <h4>🔔 交易信号</h4>
+      <div class="detail-row"><span class="label">信号</span><span class="value"><span class="badge ${p.buy_signal?.includes('buy')?'badge-buy':p.buy_signal?.includes('sell')?'badge-sell':'badge-neutral'}">${p.buy_signal}</span></span></div>
+      <div class="detail-row"><span class="label">建议仓位</span><span class="value">${pos}</span></div>
+      <div class="detail-row"><span class="label">止损价</span><span class="value" style="color:#da3633">${p.stop_loss_price||'-'}</span></div>
+      <div class="detail-row"><span class="label">止盈价</span><span class="value" style="color:#2ea043">${p.stop_profit_price||'-'}</span></div>
+      ${p.sell_signals?.length ? `<div style="margin-top:8px;font-size:12px;color:#d29922">${p.sell_signals.join('<br>')}</div>` : ''}
+    </div>
+
+    ${p.llm_thesis ? `<div class="detail-section"><h4>🤖 LLM 分析</h4><div class="thesis-text">${p.llm_thesis}</div></div>` : ''}
+    ${p.llm_catalysts?.length ? `<div class="detail-section"><h4>🚀 催化因素</h4>${p.llm_catalysts.map(c=>`<div class="news-item">• ${c}</div>`).join('')}</div>` : ''}
+    ${p.llm_risks?.length ? `<div class="detail-section"><h4>⚠️ 风险因素</h4>${p.llm_risks.map(r=>`<div class="news-item">• ${r}</div>`).join('')}</div>` : ''}
+    ${p.risk_flags?.length ? `<div class="detail-section"><h4>🚩 风险标记</h4>${p.risk_flags.map(f=>`<div class="news-item" style="color:#d29922">• ${f}</div>`).join('')}</div>` : ''}
+  `;
+  panel.classList.add('open');
+}
+
+function closeDetail() {
+  document.getElementById('detailPanel').classList.remove('open');
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
+</script>
+</body>
+</html>

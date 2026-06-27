@@ -1,0 +1,532 @@
+# full_spectrum_v2.yaml — 全维度多因子选股策略 V2
+# 基于用户完整策略体系编码，覆盖：赛道分析 + 公司分析 + 选股规则 + 买入/卖出条件 + 指标操作
+# 所有条件均可量化、可验证、可回溯
+
+name: full_spectrum_v2
+display_name: 全维度多因子选股 V2
+description: |
+  基于"基本面为核、技术面择时、资金面验证、市场面共振"的核心逻辑。
+  AI 执行时将所有条件量化为可读取的参数，多条件"与/或"逻辑，
+  符合越多条件分数越高，定期回测调整参数。
+version: "2.0"
+category: multi_factor
+tags: [full_spectrum, v2, track_analysis, company_analysis, buy_sell_signals]
+
+screening:
+  enabled: true
+  market_scope: [cn]
+  hard_filters:
+    exclude_st: true
+    amount_min: 50000000
+    market_cap_min: 5000000000
+    market_cap_max: 2000000000000
+    pe_ttm_min: 0
+    pe_ttm_max: 300
+    pb_min: 0
+    pb_max: 100
+    price_min: 2.0
+    change_pct_max: 9.5
+    turnover_rate_min: 0.5
+    turnover_rate_max: 15.0
+  tech_weight: 0.3
+  max_output: 20
+  ranking_hints: |
+    综合评分越高越好。优先选择：政策扶持赛道 + 竞争壁垒强 + 财务健康 + 估值合理。
+
+# ============================================================
+# 第一部分：赛道分析维度（行业层面筛选）
+# ============================================================
+track_analysis:
+  # 1. 政策导向 — 国家级产业规划、税收优惠等
+  policy_orientation:
+    description: "优先选择政策明确扶持的赛道，剔除政策限制/淘汰类赛道"
+    # 当前国家重点扶持赛道清单（每季度更新）
+    supported_tracks:
+      - "新能源"
+      - "半导体"
+      - "人工智能"
+      - "数字经济"
+      - "生物医药"
+      - "高端制造"
+      - "新材料"
+      - "军工"
+      - "信创"
+      - "储能"
+      - "算力"
+      - "机器人"
+      - "低空经济"
+      - "商业航天"
+      - "量子计算"
+      - "脑机接口"
+      - "可控核聚变"
+    # 政策限制/淘汰赛道（剔除）
+    restricted_tracks:
+      - "高耗能"
+      - "落后产能"
+      - "高污染"
+      - "传统煤化工"
+      - "小火电"
+      - "地条钢"
+    # 关键词匹配（公司名称/主营业务包含则触发）
+    policy_keywords_positive:
+      - "新能源"
+      - "半导体"
+      - "芯片"
+      - "人工智能"
+      - "AI"
+      - "储能"
+      - "光伏"
+      - "风电"
+      - "锂电"
+      - "氢能"
+      - "机器人"
+      - "自动驾驶"
+      - "算力"
+      - "数据中心"
+      - "云计算"
+      - "生物医药"
+      - "创新药"
+      - "医疗器械"
+      - "军工"
+      - "航天"
+      - "卫星"
+      - "5G"
+      - "6G"
+      - "量子"
+    policy_keywords_negative:
+      - "煤炭"
+      - "钢铁"
+      - "水泥"
+      - "电解铝"
+      - "煤化工"
+      - "造纸"
+      - "印染"
+    # 权重：政策赛道加分
+    policy_boost: 15
+
+  # 2. 行业周期 — 成长期/成熟期/衰退期判断
+  industry_cycle:
+    description: "优先选择成长期赛道，剔除衰退期赛道"
+    # 成长期判断：行业营收连续2年增速>10%
+    growth_threshold_revenue_yoy: 10
+    growth_years_required: 2
+    # 衰退期判断：行业营收连续2年增速<0（选股规则5）
+    decline_threshold_revenue_yoy: 0
+    decline_years_required: 2
+    # 成长期加分
+    growth_stage_boost: 10
+    # 衰退期减分（强制剔除）
+    decline_stage_penalty: -100
+
+  # 3. 供需关系 — 供给短缺/产能过剩
+  supply_demand:
+    description: "关注供给短缺赛道，规避产能过剩赛道"
+    # 产品涨价信号：PPI同比>5%
+    shortage_ppi_threshold: 5
+    # 产能过剩信号：产能利用率<70%
+    oversupply_utilization_threshold: 70
+    shortage_boost: 8
+    oversupply_penalty: -8
+
+  # 4. 景气度 — 核心经营指标连续提升
+  prosperity:
+    description: "营收/利润同比增速、订单量、产能利用率等核心指标上行"
+    # 连续N个季度环比提升（选股规则2）
+    consecutive_quarters: 2
+    # 景气度指标权重
+    metrics:
+      revenue_growth_qoq: 30      # 营收环比增速
+      net_profit_growth_qoq: 30   # 净利润环比增速
+      gross_margin_qoq: 20        # 毛利率环比变化
+      roe_qoq: 20                 # ROE环比变化
+    # 景气度综合得分阈值
+    prosperity_score_threshold: 60
+    prosperity_boost: 12
+    prosperity_penalty: -10
+
+# ============================================================
+# 第二部分：公司分析维度（个股层面评估）
+# ============================================================
+company_analysis:
+  # 1. 竞争壁垒
+  competitive_moat:
+    description: "拥有核心技术/专利/品牌护城河"
+    # 量化标准（选股规则3）
+    min_core_patents: 10           # 核心专利≥10项
+    min_market_share_pct: 15       # 市占率≥15%
+    brand_rank_top_n: 5            # 品牌市占率行业前5
+    # 壁垒评分权重
+    weights:
+      patents: 30
+      market_share: 40
+      brand_rank: 30
+    # 壁垒综合得分阈值
+    moat_score_threshold: 60
+    moat_boost: 12
+
+  # 2. 财务健康度
+  financial_health:
+    description: "毛利率/净利率持续提升、现金流充裕、资产负债率合理"
+    # 选股规则4：具体指标
+    gross_margin_premium_pct: 10          # 毛利率≥行业均值+10%
+    ocf_to_net_profit_min_pct: 80         # 经营性现金流净额/净利润≥80%
+    max_debt_to_asset_pct: 60             # 资产负债率≤60%（金融行业除外）
+    # 扩展指标
+    min_current_ratio: 1.0                # 流动比率≥1.0
+    max_goodwill_to_equity_pct: 10        # 商誉/净资产<10%
+    # 财务健康评分权重
+    weights:
+      gross_margin_premium: 25
+      ocf_conversion: 25
+      debt_ratio: 20
+      current_ratio: 15
+      goodwill_safety: 15
+    financial_health_threshold: 60
+    financial_boost: 10
+
+  # 3. 管理层能力
+  management_quality:
+    description: "过往业绩兑现度高、战略布局清晰"
+    # 量化代理指标（因管理层能力难以直接量化）
+    # 使用：业绩预告准确度、分红连续性、回购意愿等
+    min_consecutive_dividend_years: 2     # 连续分红年数≥2
+    min_eps_growth_consistency: 0.6       # EPS增长一致性（达标季度/总季度≥60%）
+    management_boost: 8
+
+# ============================================================
+# 第三部分：选股规则（5条硬性规则）
+# ============================================================
+selection_rules:
+  # 规则1：政策明确扶持的赛道
+  rule_1_policy:
+    description: "优先选择政策明确扶持的赛道，剔除政策限制/淘汰类赛道"
+    enabled: true
+    mandatory: true  # 强制执行，不满足直接剔除
+
+  # 规则2：赛道景气度指标连续2个季度环比提升，行业排名前30%
+  rule_2_prosperity:
+    description: "赛道景气度指标（营收增速、产能利用率、行业利润率）连续2个季度环比提升，且行业排名前30%"
+    enabled: true
+    consecutive_quarters: 2
+    industry_rank_top_pct: 30
+    mandatory: true
+
+  # 规则3：公司具备不可替代的核心壁垒
+  rule_3_moat:
+    description: "专利数≥10项核心专利/市占率≥15%/品牌市占率行业前5"
+    enabled: true
+    # 满足任意一项即可
+    moat_condition: "any"  # any/all
+    mandatory: false  # 非强制，但大幅加分
+
+  # 规则4：财务指标达标
+  rule_4_financials:
+    description: "毛利率≥行业均值10%、经营性现金流净额/净利润≥80%、资产负债率≤60%"
+    enabled: true
+    mandatory: true
+
+  # 规则5：剔除衰退期+市占率下滑
+  rule_5_decline_filter:
+    description: "剔除处于行业衰退期（连续2年行业营收增速<0）且公司市占率持续下滑的标的"
+    enabled: true
+    mandatory: true  # 强制剔除
+
+# ============================================================
+# 第四部分：买入条件（6个条件，符合越多分数越高）
+# ============================================================
+buy_conditions:
+  # 条件1：基本面改善
+  condition_1_fundamental:
+    description: "连续2个季度净利润环比增速≥30%，且营收增速≥20%，同时毛利率止跌回升（环比+≥2%）"
+    weight: 25
+    checks:
+      net_profit_growth_qoq_consecutive:
+        quarters: 2
+        min_growth_pct: 30
+      revenue_growth_qoq:
+        min_growth_pct: 20
+      gross_margin_recovery:
+        min_qoq_improvement_pct: 2
+
+  # 条件2：技术面突破
+  condition_2_technical:
+    description: "股价突破年线（250日均线），突破后3个交易日内成交量放大≥50%，换手率维持在3%-8%"
+    weight: 20
+    checks:
+      price_above_ma250: true
+      volume_surge_pct: 50
+      volume_surge_window_days: 3
+      turnover_rate_min_pct: 3
+      turnover_rate_max_pct: 8
+
+  # 条件3：资金面认可
+  condition_3_capital:
+    description: "北向资金连续5个交易日净买入，累计买入金额占流通市值≥0.5%；龙虎榜出现2家以上机构净买入"
+    weight: 20
+    checks:
+      northbound_consecutive_days: 5
+      northbound_min_accumulated_pct: 0.5
+      institutional_buyers_min: 2
+      no_major_seller: true
+
+  # 条件4：事件驱动
+  condition_4_event:
+    description: "公司发布重大订单（订单金额≥上一年营收的20%）/技术突破（核心专利落地），且对应赛道处于政策景气周期"
+    weight: 15
+    checks:
+      major_order_threshold_pct: 20  # 订单金额≥上年营收20%
+      patent_breakthrough: true
+      track_in_policy_support: true
+
+  # 条件5：估值面
+  condition_5_valuation:
+    description: "市盈率（PE）低于行业均值30%，且PEG＜1，同时公司分红率≥3%"
+    weight: 12
+    checks:
+      pe_below_industry_avg_pct: 30
+      peg_max: 1.0
+      min_dividend_yield_pct: 3.0
+
+  # 条件6：情绪面/市场表现
+  condition_6_sentiment:
+    description: "大盘回调时个股横盘抗跌（跌幅＜大盘50%），大盘反弹时个股涨幅＞大盘100%，换手率温和（1%-5%）"
+    weight: 8
+    checks:
+      max_drawdown_vs_market_ratio: 0.5    # 个股跌幅<大盘跌幅的50%
+      min_rally_vs_market_ratio: 2.0       # 个股涨幅>大盘涨幅的100%（即2倍）
+      turnover_rate_min_pct: 1.0
+      turnover_rate_max_pct: 5.0
+
+  # 总分阈值（基于实际评分分布校准）
+  min_total_score: 35  # 总分≥35分触发买入预警
+  strong_buy_threshold: 55  # 总分≥55分触发强烈买入信号
+
+# ============================================================
+# 第五部分：卖出条件（触发卖出信号）
+# ============================================================
+sell_conditions:
+  # 基本面卖出
+  fundamental_sell:
+    description: "净利润增速<0且毛利率环比下滑≥5%，或业绩预告亏损/低于预期，或行业政策利空"
+    triggers:
+      - condition: "net_profit_growth < 0 AND gross_margin_qoq_change <= -5"
+        severity: "high"
+        action: "sell_warning"
+      - condition: "earnings_forecast == 'loss' OR earnings_forecast == 'below_expectation'"
+        severity: "high"
+        action: "sell_warning"
+      - condition: "policy_change == 'negative'"
+        severity: "high"
+        action: "sell_warning"
+
+  # 技术面卖出
+  technical_sell:
+    description: "股价跌破20日均线且成交量放大（破位确认），或MACD死叉，或达到止盈/止损价"
+    triggers:
+      - condition: "price_below_ma20 AND volume > volume_ma20 * 1.5"
+        severity: "medium"
+        action: "reduce_position"
+      - condition: "macd_death_cross"
+        severity: "medium"
+        action: "reduce_position"
+      - condition: "price >= buy_price * (1 + stop_profit_pct)"
+        severity: "high"
+        action: "take_profit"
+      - condition: "price <= buy_price * (1 - stop_loss_pct)"
+        severity: "critical"
+        action: "stop_loss"
+
+  # 资金面卖出
+  capital_sell:
+    description: "主力资金连续3日净流出，或北向资金单日净卖出≥1%流通市值"
+    triggers:
+      - condition: "main_fund_outflow_consecutive_days >= 3 AND daily_outflow >= 80000000"
+        severity: "high"
+        action: "sell_warning"
+      - condition: "northbound_daily_sell_pct >= 1.0"
+        severity: "high"
+        action: "sell_warning"
+
+  # 市场环境卖出
+  market_sell:
+    description: "沪深300指数跌幅≥1%（大盘走弱），或个股所属行业跌幅≥2%（赛道退潮）"
+    triggers:
+      - condition: "hs300_daily_change_pct <= -1.0"
+        severity: "medium"
+        action: "reduce_position"
+      - condition: "sector_daily_change_pct <= -2.0"
+        severity: "medium"
+        action: "reduce_position"
+
+# ============================================================
+# 第六部分：指标操作细则（AI执行标准）
+# ============================================================
+indicator_operations:
+  # PE操作
+  pe_operations:
+    - condition: "pe_ratio > industry_pe_avg * 2"
+      action: "reduce_50pct"
+      description: "PE>行业均值100% → 减仓50%"
+    - condition: "pe_ratio < industry_pe_avg * 0.7 AND peg < 1"
+      action: "add_20pct"
+      description: "PE<行业均值30%且PEG<1 → 加仓20%"
+
+  # MACD操作
+  macd_operations:
+    - condition: "macd_golden_cross AND macd_histogram > 0 AND macd_histogram_increasing"
+      action: "initial_buy_30pct"
+      description: "MACD金叉且红柱放大 → 首次建仓30%"
+    - condition: "macd_death_cross AND macd_histogram < 0 AND macd_histogram_decreasing"
+      action: "reduce_50pct"
+      description: "MACD死叉且绿柱放大 → 减仓50%"
+
+  # 换手率操作
+  turnover_operations:
+    - condition: "turnover_rate > 15 AND NOT is_sub_new"
+      action: "clear_30pct"
+      description: "换手率>15%（非次新股）→ 清仓30%"
+
+  # 北向资金操作
+  northbound_operations:
+    - condition: "northbound_daily_buy_pct >= 0.5"
+      action: "add_10pct"
+      description: "北向资金单日净买入≥0.5%流通市值 → 加仓10%"
+
+  # 止损止盈
+  stop_operations:
+    - condition: "price <= buy_price * 0.9"
+      action: "clear_all"
+      description: "跌破止损价（买入价-10%）→ 清仓"
+    - condition: "price >= buy_price * 1.3"
+      action: "take_profit_50pct_then_trail"
+      description: "达到止盈价（买入价+30%）→ 止盈50%，剩余设止盈价（买入价+20%）"
+
+# ============================================================
+# 第七部分：买入建议（仓位/择时/标的）
+# ============================================================
+buy_advice:
+  # 择时建议
+  timing:
+    description: "回调至20日均线买入，突破前期高点加仓"
+    entry_signal: "price_near_ma20 AND NOT price_below_ma20"
+    add_signal: "price_break_previous_high"
+    avoid: "追高（价格远离均线>10%）"
+
+  # 仓位建议
+  position_sizing:
+    description: "单一个股仓位不超过总仓位20%，首次建仓30%，验证盈利后加仓"
+    max_single_stock_pct: 20
+    max_single_sector_pct: 40
+    min_cash_pct: 10
+    initial_position_pct: 30
+    first_add_pct: 40
+    final_add_pct: 30
+
+  # 标的选择建议
+  stock_selection:
+    description: "优先选择赛道龙头+二线成长股组合"
+    prefer: "赛道龙头（抗风险能力强）+ 二线成长股（弹性高）"
+
+# ============================================================
+# 第八部分：补充策略规则
+# ============================================================
+supplementary_rules:
+  # 仓位管理
+  position_management:
+    max_single_stock_pct: 20       # 单一个股仓位≤20%
+    max_single_sector_pct: 40      # 单一赛道仓位≤40%
+    min_cash_pct: 10               # 现金仓位≥10%
+
+  # 回测要求
+  backtest_requirements:
+    lookback_years: 3              # 回溯近3年数据
+    min_win_rate_pct: 60           # 胜率≥60%
+    min_profit_loss_ratio: 2.0     # 盈亏比≥2:1
+
+  # 动态调整
+  dynamic_adjustment:
+    industry_avg_update_freq: "monthly"     # 每月更新行业均值
+    policy_track_update_freq: "quarterly"   # 每季度更新政策赛道清单
+
+  # 风险规避（硬性剔除）
+  risk_filter:
+    exclude_st: true               # 剔除ST股
+    exclude_delisting_risk: true   # 剔除退市风险股
+    exclude_consecutive_loss_years: 3  # 剔除连续3年亏损股
+    min_daily_amount: 50000000     # 日均成交额<5000万剔除（流动性不足）
+    max_pe_ratio: 300              # PE>300剔除
+    min_price: 2.0                 # 股价<2元剔除
+
+# ============================================================
+# 第九部分：L1硬性过滤器（快照层面，最快执行）
+# ============================================================
+filters:
+  # 基础过滤
+  max_pe_ratio: 300
+  max_pb_ratio: 100
+  min_price: 2.0
+  min_amount: 50000000
+  max_change_pct: 9.5
+  min_market_cap: 5000000000
+  max_market_cap: 2000000000000
+
+  # 排除规则
+  exclude_st: true
+  exclude_sub_new: true
+  sub_new_min_days: 60
+  max_turnover_rate: 15.0
+  min_turnover_rate: 0.5
+
+  # 北交所排除
+  exclude_bse: true
+  bse_prefix: "8"
+
+  # 优先板块（加分）
+  preferred_sectors:
+    - "科创板"
+    - "创业板"
+
+  # 行业排除
+  excluded_industries:
+    - "ST板块"
+    - "*ST板块"
+
+# ============================================================
+# 第十部分：评分权重总览（L2全维度打分）
+# ============================================================
+scoring:
+  # 各维度权重（总和=100）
+  weights:
+    # 赛道分析维度 (40分)
+    policy_orientation: 15         # 政策导向
+    industry_cycle: 10             # 行业周期
+    supply_demand: 8               # 供需关系
+    prosperity: 7                  # 景气度
+
+    # 公司分析维度 (35分)
+    competitive_moat: 12           # 竞争壁垒
+    financial_health: 15           # 财务健康度
+    management_quality: 8          # 管理层能力
+
+    # 买入条件验证 (25分)
+    fundamental_improvement: 10    # 基本面改善
+    technical_signals: 5           # 技术面信号
+    capital_flow: 5                # 资金面认可
+    valuation_safety: 5            # 估值安全边际
+
+  # 买入/卖出阈值（基于实际评分分布校准）
+  buy_threshold: 35               # 总分≥35触发买入预警
+  strong_buy_threshold: 55        # 总分≥55触发强烈买入
+  sell_threshold: 20              # 总分≤20触发卖出预警
+  strong_sell_threshold: 10       # 总分≤10触发强烈卖出
+
+# ============================================================
+# 第十一部分：元信息
+# ============================================================
+meta:
+  strategy_version: "2.0"
+  created: "2026-06-03"
+  author: "AI选股系统"
+  last_updated: "2026-06-03"
+  review_cycle: "monthly"
+  next_review: "2026-07-03"

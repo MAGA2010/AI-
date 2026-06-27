@@ -25,6 +25,7 @@ def test_list_strategies_returns_enabled_strategies_only():
         "balanced_alpha",
         "capital_heat",
         "dual_low",
+        "full_spectrum_v2",
         "momentum_quality",
         "oversold_reversal",
         "quality_value",

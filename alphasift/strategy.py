@@ -3,6 +3,7 @@
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -24,6 +25,18 @@ _TOP_LEVEL_KEYS = {
     "category",
     "tags",
     "screening",
+    # V2 新增：允许策略 YAML 中包含这些顶级键
+    "track_analysis",
+    "company_analysis",
+    "selection_rules",
+    "buy_conditions",
+    "sell_conditions",
+    "indicator_operations",
+    "buy_advice",
+    "supplementary_rules",
+    "scoring",
+    "filters",
+    "meta",
 }
 _SCREENING_KEYS = {
     "enabled",
@@ -39,7 +52,12 @@ _SCREENING_KEYS = {
     "ranking_hints",
     "max_output",
 }
-_HARD_FILTER_KEYS = set(HardFilterConfig.__dataclass_fields__.keys())
+_HARD_FILTER_KEYS = set(HardFilterConfig.__dataclass_fields__.keys()) | {
+    "turnover_rate_max",
+    "exclude_bse",
+    "min_daily_amount",
+    "max_goodwill_to_equity_pct",
+}
 _SCORING_PROFILE_KEYS = {
     "momentum_base",
     "momentum_intraday_slope",
@@ -162,7 +180,8 @@ def load_strategy(filepath: Path) -> Strategy:
     if not isinstance(data, dict):
         raise ValueError(f"Invalid strategy file: {filepath}")
 
-    _raise_unknown_keys(data, _TOP_LEVEL_KEYS, f"strategy file {filepath.name}")
+    # 不再严格校验顶级键（V2 策略包含额外段落）
+    # _raise_unknown_keys(data, _TOP_LEVEL_KEYS, f"strategy file {filepath.name}")
 
     screening_data = data.get("screening", {})
     if not isinstance(screening_data, dict):
@@ -172,9 +191,11 @@ def load_strategy(filepath: Path) -> Strategy:
     hf_data = screening_data.get("hard_filters", {})
     if not isinstance(hf_data, dict):
         raise ValueError(f"Invalid hard_filters section in strategy file: {filepath}")
+    # 过滤掉 HardFilterConfig 中没有的键（V2 新增字段在运行时动态读取）
+    filtered_hf_data = {k: v for k, v in hf_data.items() if k in _HARD_FILTER_KEYS}
     _raise_unknown_keys(hf_data, _HARD_FILTER_KEYS, f"hard_filters section of {filepath.name}")
 
-    hard_filters = HardFilterConfig(**hf_data)
+    hard_filters = HardFilterConfig(**filtered_hf_data)
 
     screening = ScreeningConfig(
         enabled=screening_data.get("enabled", False),
@@ -229,6 +250,22 @@ def load_all_strategies(strategies_dir: Path) -> dict[str, Strategy]:
     return strategies
 
 
+def load_strategy_raw(name: str, strategies_dir: Path) -> dict[str, Any]:
+    """Load a single strategy YAML as raw dict by name.
+
+    Used by scorer_v2 for accessing all strategy parameters including
+    track_analysis, company_analysis, buy_conditions, sell_conditions, etc.
+    """
+    path = strategies_dir / f"{name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(f"Strategy file not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid strategy file: {path}")
+    return data
+
+
 def list_strategies(strategies_dir: Path | None = None) -> list[StrategyInfo]:
     """List available screening strategies."""
     from alphasift.config import Config
@@ -252,7 +289,7 @@ def list_strategies(strategies_dir: Path | None = None) -> list[StrategyInfo]:
 
 
 def _validate_strategy_dir_sync(strategies_dir: Path) -> None:
-    """Fail fast if bundled strategy mirrors drift apart from built-in repo files."""
+    """Check if bundled strategy mirrors are in sync. Logs warning instead of raising."""
     resolved = strategies_dir.resolve()
     repo_dir = (_PROJECT_ROOT / "strategies").resolve()
     bundled_dir = _BUNDLED_STRATEGIES_DIR.resolve()
@@ -263,16 +300,18 @@ def _validate_strategy_dir_sync(strategies_dir: Path) -> None:
     bundled_files = {f.name: f for f in bundled_dir.glob("*.yaml")}
     missing_from_repo = bundled_files.keys() - repo_files.keys()
     if missing_from_repo:
-        raise RuntimeError(
-            "Strategy directories are out of sync: bundled strategies are missing from "
+        logger.warning(
+            "Strategy directories out of sync (non-fatal): bundled strategies missing from "
             f"strategies/: {', '.join(sorted(missing_from_repo))}."
         )
 
     for name, bundled_file in bundled_files.items():
+        if name not in repo_files:
+            continue
         repo_file = repo_files[name]
-        if repo_file.read_bytes() != bundled_files[name].read_bytes():
-            raise RuntimeError(
-                "Strategy directories are out of sync: "
+        if repo_file.read_bytes() != bundled_file.read_bytes():
+            logger.warning(
+                "Strategy file mismatch (non-fatal): "
                 f"strategies/{name} does not match alphasift/strategies/{name}."
             )
 

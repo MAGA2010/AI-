@@ -12,6 +12,7 @@ class HardFilterConfig:
     price_min: float | None = None
     price_max: float | None = None
     amount_min: float | None = None
+    amount_max: float | None = None
     market_cap_min: float | None = None
     market_cap_max: float | None = None
     pe_ttm_min: float | None = None
@@ -40,6 +41,14 @@ class HardFilterConfig:
     pullback_to_ma20_pct_max: float | None = None
     consolidation_days_20d_min: int | None = None
     consolidation_days_20d_max: int | None = None
+    # === V2 新增硬性过滤字段 ===
+    turnover_rate_max: float | None = None
+    exclude_bse: bool = False
+    min_daily_amount: float | None = None
+    max_goodwill_to_equity_pct: float | None = None
+    exclude_sub_new: bool = False
+    sub_new_min_days: int = 60
+    exclude_consecutive_loss_years: int | None = None
 
 
 @dataclass
@@ -158,6 +167,30 @@ class Pick:
     deep_analysis_operation_advice: str = ""
     deep_analysis_trend_prediction: str = ""
     deep_analysis_risk_flags: list[str] = field(default_factory=list)
+    # === V2 新增字段：全维度策略所需 ===
+    # 赛道分析
+    track_policy_score: float | None = None
+    track_cycle_score: float | None = None
+    track_supply_demand_score: float | None = None
+    track_prosperity_score: float | None = None
+    # 公司分析
+    moat_score: float | None = None
+    financial_health_score: float | None = None
+    management_score: float | None = None
+    # 买入条件得分
+    buy_condition_fundamental: float | None = None
+    buy_condition_technical: float | None = None
+    buy_condition_capital: float | None = None
+    buy_condition_event: float | None = None
+    buy_condition_valuation: float | None = None
+    buy_condition_sentiment: float | None = None
+    # 买入/卖出信号
+    buy_signal: str = ""          # "strong_buy" / "buy" / "neutral" / "sell" / "strong_sell"
+    sell_signals: list[str] = field(default_factory=list)
+    # 仓位建议
+    suggested_position_pct: float | None = None
+    stop_loss_price: float | None = None
+    stop_profit_price: float | None = None
 
 
 @dataclass

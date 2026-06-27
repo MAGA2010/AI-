@@ -13,6 +13,24 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# akshare 新浪接口的列名映射
+_AKSHARE_SINA_RENAME_MAP = {
+    "代码": "code",
+    "名称": "name",
+    "最新价": "price",
+    "涨跌额": "change_amt",
+    "涨跌幅": "change_pct",
+    "成交量": "volume",
+    "成交额": "amount",
+    "昨收": "prev_close",
+    "今开": "open",
+    "最高": "high",
+    "最低": "low",
+    "买入": "bid1",
+    "卖出": "ask1",
+    "时间戳": "time_str",
+}
+
 
 def fetch_cn_snapshot(source: str = "efinance") -> pd.DataFrame:
     """Fetch A-share full-market snapshot.
@@ -27,10 +45,16 @@ def fetch_cn_snapshot(source: str = "efinance") -> pd.DataFrame:
         return _fetch_efinance()
     elif source == "akshare_em":
         return _fetch_akshare_em()
+    elif source == "akshare_sina":
+        return _fetch_akshare_sina()
     elif source == "em_datacenter":
         return _fetch_em_datacenter()
     elif source == "tushare":
         return _fetch_tushare()
+    elif source == "baostock":
+        return _fetch_baostock()
+    elif source == "data_manager":
+        return _fetch_via_data_manager()
     else:
         raise ValueError(f"Unknown snapshot source: {source}")
 
@@ -93,6 +117,54 @@ def _fetch_akshare_em() -> pd.DataFrame:
     return _normalize(df, source="akshare_em")
 
 
+def _fetch_akshare_sina() -> pd.DataFrame:
+    """Fetch via akshare (sina) — 这个接口在你的网络环境下可用。"""
+    import akshare as ak
+    import time
+
+    # 添加重试逻辑，因为 akshare 偶尔会返回 HTML 而不是数据
+    max_retries = 3
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            df = ak.stock_zh_a_spot()
+            if df is not None and not df.empty:
+                df = df.rename(columns=_AKSHARE_SINA_RENAME_MAP)
+
+                # 数值类型转换
+                numeric_cols = [
+                    "price", "change_amt", "change_pct", "volume", "amount",
+                    "prev_close", "open", "high", "low", "bid1", "ask1",
+                ]
+                for col in numeric_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+                # 过滤无效数据
+                df = df[df["price"].notna() & (df["price"] > 0)]
+                df = df[df["code"].notna()]
+
+                df.attrs["source"] = "akshare_sina"
+                return df
+            else:
+                raise RuntimeError("akshare sina returned empty data")
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(2)  # 等待 2 秒后重试
+                continue
+
+    raise RuntimeError(f"akshare sina failed after {max_retries} attempts: {last_error}")
+
+
+def _fetch_via_data_manager() -> pd.DataFrame:
+    """Fetch via DataSourceManager (uses multiple fallbacks)."""
+    from alphasift.data_manager import DataSourceManager
+    manager = DataSourceManager()
+    return manager.fetch_realtime_snapshot()
+
+
 def _fetch_em_datacenter() -> pd.DataFrame:
     """Fetch via eastmoney datacenter xuangu API.
 
@@ -128,213 +200,191 @@ def _fetch_em_datacenter() -> pd.DataFrame:
         data = resp.json()
 
         if not data.get("success"):
-            raise RuntimeError(f"em_datacenter API error: {data.get('message', 'unknown')}")
+            raise RuntimeError(f"em_datacenter API error: {data.get('message', data)}")
 
-        items = data["result"]["data"]
+        result = data.get("result", {})
+        items = result.get("data") or []
         all_items.extend(items)
 
-        total_count = data["result"]["count"]
-        if page * page_size >= total_count:
+        total_pages = result.get("pageCount") or result.get("pages") or 1
+        if page >= total_pages:
             break
         page += 1
 
     if not all_items:
-        raise RuntimeError("em_datacenter returned no data")
+        raise RuntimeError("em_datacenter returned empty data")
 
     df = pd.DataFrame(all_items)
+    df = df.rename(columns={
+        "SECURITY_CODE": "code",
+        "SECURITY_NAME_ABBR": "name",
+        "NEW_PRICE": "price",
+        "CHANGE_RATE": "change_pct",
+        "VOLUME_RATIO": "volume_ratio",
+        "DEAL_AMOUNT": "amount",
+        "TURNOVERRATE": "turnover_rate",
+        "PE9": "pe_ratio",
+        "PBNEWMRQ": "pb_ratio",
+        "TOTAL_MARKET_CAP": "total_mv",
+        "CIRCULATION_MARKET_CAP": "circ_mv",
+    })
+
+    for col in [
+        "price", "change_pct", "volume_ratio", "amount", "turnover_rate",
+        "pe_ratio", "pb_ratio", "total_mv", "circ_mv",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     return _normalize(df, source="em_datacenter")
 
 
 def _fetch_tushare() -> pd.DataFrame:
-    """Fetch latest available A-share snapshot via Tushare Pro.
-
-    Tushare is not a real-time source here. It is used as a resilient fallback
-    by joining the latest open trading day's daily quote and daily_basic data.
-    """
-    token = (
-        os.getenv("TUSHARE_TOKEN", "").strip()
-        or os.getenv("TUSHARE_API_TOKEN", "").strip()
-    )
-    if not token:
-        raise RuntimeError("tushare requires TUSHARE_TOKEN")
-
+    """Fetch via tushare."""
     import tushare as ts
 
-    pro = ts.pro_api(token)
-    trade_date = _resolve_tushare_trade_date(pro)
-    daily = pro.daily(
-        trade_date=trade_date,
-        fields="ts_code,trade_date,close,pct_chg,amount",
+    token = os.environ.get("TUSHARE_TOKEN", "")
+    if not token:
+        raise RuntimeError("TUSHARE_TOKEN environment variable not set")
+    ts.set_token(token)
+    pro = ts.pro_api()
+    df = pro.daily_basic(
+        trade_date=date.today().strftime("%Y%m%d"),
+        ts_code="",
+        fields="ts_code,close,pe_ttm,pb,turnover_rate_f,volume_ratio,total_mv,circ_mv",
     )
-    daily_basic = pro.daily_basic(
-        trade_date=trade_date,
-        fields="ts_code,turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv",
-    )
-    stock_basic = pro.stock_basic(
-        exchange="",
-        list_status="L",
-        fields="ts_code,symbol,name,industry",
-    )
-
-    if daily is None or daily.empty:
-        raise RuntimeError(f"tushare daily returned empty data for {trade_date}")
-    if daily_basic is None or daily_basic.empty:
-        raise RuntimeError(f"tushare daily_basic returned empty data for {trade_date}")
-
-    return _prepare_tushare_snapshot(daily, daily_basic, stock_basic)
+    if df is None or df.empty:
+        prev_day = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
+        df = pro.daily_basic(
+            trade_date=prev_day,
+            ts_code="",
+            fields="ts_code,close,pe_ttm,pb,turnover_rate_f,volume_ratio,total_mv,circ_mv",
+        )
+    if df is None or df.empty:
+        raise RuntimeError("tushare returned empty data")
+    df = df.rename(columns={"ts_code": "code", "close": "price", "pe_ttm": "pe_ratio", "pb": "pb_ratio", "turnover_rate_f": "turnover_rate"})
+    return _normalize(df, source="tushare")
 
 
-def _resolve_tushare_trade_date(pro) -> str:
-    """Return the latest open trade date for Tushare requests."""
-    explicit = os.getenv("TUSHARE_TRADE_DATE", "").strip()
-    if explicit:
-        return explicit
+def _fetch_baostock() -> pd.DataFrame:
+    """Fetch via baostock — 使用新浪服务器，不依赖东方财富。
 
-    end = date.today()
-    start = end - timedelta(days=30)
-    calendar = pro.trade_cal(
-        exchange="",
-        start_date=start.strftime("%Y%m%d"),
-        end_date=end.strftime("%Y%m%d"),
-        is_open="1",
-        fields="cal_date,is_open",
-    )
-    if calendar is None or calendar.empty or "cal_date" not in calendar.columns:
-        raise RuntimeError("tushare trade_cal returned no open trading days")
-    return str(calendar["cal_date"].max())
+    流程：
+    1. 登录 → 直接用昨天日期
+    2. query_hs300_stocks → 拿到300只成分股
+    3. 逐只查最新日线（单线程，baostock非线程安全）
+    """
+    import baostock as bs
+    from datetime import datetime, timedelta
 
+    lg = bs.login()
+    if lg.error_code != '0':
+        raise RuntimeError(f"baostock login failed: {lg.error_msg}")
 
-def _prepare_tushare_snapshot(
-    daily: pd.DataFrame,
-    daily_basic: pd.DataFrame,
-    stock_basic: pd.DataFrame | None,
-) -> pd.DataFrame:
-    """Join and unit-normalize Tushare tables into the common snapshot schema."""
-    merged = daily.merge(daily_basic, on="ts_code", how="left")
-    if stock_basic is not None and not stock_basic.empty:
-        merged = merged.merge(stock_basic, on="ts_code", how="left")
-    if "symbol" not in merged.columns:
-        merged["symbol"] = merged["ts_code"].astype(str).str.split(".").str[0]
-    else:
-        fallback_symbol = merged["ts_code"].astype(str).str.split(".").str[0]
-        merged["symbol"] = merged["symbol"].fillna(fallback_symbol)
+    try:
+        # ── 1. 直接用昨天日期 ──────────────────────────────
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Tushare units: amount is thousand yuan; market caps are ten-thousand yuan.
-    for col, multiplier in {
-        "amount": 1000,
-        "total_mv": 10000,
-        "circ_mv": 10000,
-    }.items():
-        if col in merged.columns:
-            merged[col] = pd.to_numeric(merged[col], errors="coerce") * multiplier
+        # ── 2. 获取沪深300成分股（300只，瞬间完成）──────────
+        rs = bs.query_hs300_stocks()
+        hs300_codes = []
+        while (rs.error_code == '0') and rs.next():
+            row = rs.get_row_data()
+            hs300_codes.append(row[1])  # sh.600000 格式
 
-    return _normalize(merged, source="tushare")
+        if not hs300_codes:
+            raise RuntimeError("baostock: 未获取到沪深300成分股")
+
+        # ── 3. 获取名称映射 ─────────────────────────────────
+        rs2 = bs.query_stock_basic()
+        code_name_map = {}
+        while (rs2.error_code == '0') and rs2.next():
+            row = rs2.get_row_data()
+            code_name_map[row[0]] = row[1]  # code -> name
+
+        # ── 4. 逐只查最新日线（单线程，baostock非线程安全）──
+        fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ"
+        total = len(hs300_codes)
+        print(f"  [baostock] 开始获取 {total} 只股票数据...")
+
+        all_data = []
+        for i, code in enumerate(hs300_codes, 1):
+            try:
+                rs = bs.query_history_k_data_plus(
+                    code, fields,
+                    start_date=yesterday, end_date=yesterday,
+                    frequency="d", adjustflag="3",
+                )
+                while (rs.error_code == '0') and rs.next():
+                    all_data.append(rs.get_row_data())
+            except Exception:
+                pass
+
+            if i % 50 == 0 or i == total:
+                print(f"  [baostock] {i}/{total} 已完成，获取 {len(all_data)} 条有效数据")
+
+        if not all_data:
+            raise RuntimeError("baostock: 未获取到任何股票数据")
+
+        print(f"  [baostock] 获取完成，共 {len(all_data)} 只有效股票")
+
+        # ── 5. 组装 DataFrame ───────────────────────────────
+        df = pd.DataFrame(all_data, columns=[
+            "date", "code", "open", "high", "low", "close",
+            "volume", "amount", "turnover_rate", "change_pct",
+            "pe_ratio", "pb_ratio"
+        ])
+
+        numeric_cols = ["open", "high", "low", "close", "volume", "amount",
+                        "turnover_rate", "change_pct", "pe_ratio", "pb_ratio"]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # code: sh.600000 -> 600000
+        df["code"] = df["code"].str.split(".").str[-1]
+
+        # name 映射
+        short_map = {k.split(".")[-1]: v for k, v in code_name_map.items()}
+        df["name"] = df["code"].map(short_map)
+
+        # price = close
+        df["price"] = df["close"]
+
+        # 过滤无效
+        df = df[df["price"].notna() & (df["price"] > 0)]
+        df = df[df["code"].notna() & (df["code"] != "")]
+        df = df[df["code"].str.match(r"^[036]\d{5}$")]
+
+        return _normalize(df, source="baostock")
+
+    finally:
+        bs.logout()
 
 
 def _normalize(df: pd.DataFrame, source: str) -> pd.DataFrame:
-    """Normalize column names to a standard schema.
-
-    Standard columns: code, name, price, change_pct, amount, total_mv,
-                      circ_mv, pe_ratio, pb_ratio, volume_ratio, turnover_rate
-    """
-    df = df.copy()
-
-    if source == "efinance":
-        standard_cols = {
-            "code": ["股票代码", "代码"],
-            "name": ["股票名称", "名称"],
-            "price": ["最新价"],
-            "change_pct": ["涨跌幅"],
-            "amount": ["成交额"],
-            "total_mv": ["总市值"],
-            "circ_mv": ["流通市值"],
-            "pe_ratio": ["动态市盈率", "市盈率(动)"],
-            "pb_ratio": ["市净率"],
-            "volume_ratio": ["量比"],
-            "turnover_rate": ["换手率"],
-            "industry": ["行业", "所属行业", "行业板块"],
-            "concepts": ["概念", "概念题材", "题材"],
-        }
-    elif source == "akshare_em":
-        standard_cols = {
-            "code": ["代码"],
-            "name": ["名称"],
-            "price": ["最新价"],
-            "change_pct": ["涨跌幅"],
-            "amount": ["成交额"],
-            "total_mv": ["总市值"],
-            "circ_mv": ["流通市值"],
-            "pe_ratio": ["市盈率-动态", "市盈率(动)"],
-            "pb_ratio": ["市净率"],
-            "volume_ratio": ["量比"],
-            "turnover_rate": ["换手率"],
-            "industry": ["行业", "所属行业", "行业板块"],
-            "concepts": ["概念", "概念题材", "题材"],
-        }
-    elif source == "em_datacenter":
-        standard_cols = {
-            "code": ["SECURITY_CODE"],
-            "name": ["SECURITY_NAME_ABBR"],
-            "price": ["NEW_PRICE"],
-            "change_pct": ["CHANGE_RATE"],
-            "amount": ["DEAL_AMOUNT"],
-            "total_mv": ["TOTAL_MARKET_CAP"],
-            "circ_mv": ["CIRCULATION_MARKET_CAP"],
-            "pe_ratio": ["PE9"],
-            "pb_ratio": ["PBNEWMRQ"],
-            "volume_ratio": ["VOLUME_RATIO"],
-            "turnover_rate": ["TURNOVERRATE"],
-            "industry": ["INDUSTRY", "INDUSTRY_NAME", "BOARD_NAME"],
-            "concepts": ["CONCEPT", "CONCEPT_NAME", "THEME_NAME"],
-        }
-    elif source == "tushare":
-        standard_cols = {
-            "code": ["symbol", "code"],
-            "name": ["name"],
-            "price": ["close"],
-            "change_pct": ["pct_chg"],
-            "amount": ["amount"],
-            "total_mv": ["total_mv"],
-            "circ_mv": ["circ_mv"],
-            "pe_ratio": ["pe"],
-            "pb_ratio": ["pb"],
-            "volume_ratio": ["volume_ratio"],
-            "turnover_rate": ["turnover_rate"],
-            "industry": ["industry"],
-            "concepts": ["concepts"],
-        }
-    else:
-        standard_cols = {}
-
-    df = _rename_standard_columns(df, standard_cols)
-
-    # Coerce numeric columns
-    numeric_cols = [
-        "price", "change_pct", "amount", "total_mv", "circ_mv",
-        "pe_ratio", "pb_ratio", "volume_ratio", "turnover_rate",
-    ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Drop rows without a valid price
-    if "price" in df.columns:
-        df = df.dropna(subset=["price"])
-        df = df[df["price"] > 0]
-
-    df.attrs["snapshot_source"] = source
+    if "code" not in df.columns:
+        col = "ts_code" if "ts_code" in df.columns else df.columns[0]
+        df = df.rename(columns={col: "code"})
+    df["code"] = df["code"].astype(str).str.split(".").str[0]
+    df.attrs["source"] = source
     return df
 
 
-def _rename_standard_columns(
-    df: pd.DataFrame,
-    standard_cols: dict[str, list[str]],
+def take_snapshot(
+    market: str = "cn",
+    source_priority: list[str] | None = None,
+    *,
+    required_columns: list[str] | None = None,
+    config: object | None = None,
 ) -> pd.DataFrame:
-    """Rename the first matching source column for each standard field."""
-    rename_map: dict[str, str] = {}
-    for standard_name, candidates in standard_cols.items():
-        for candidate in candidates:
-            if candidate in df.columns:
-                rename_map[candidate] = standard_name
-                break
-    return df.rename(columns=rename_map)
+    if market.lower() not in {"cn", "a", "a_share", "china"}:
+        raise ValueError(f"Unsupported market for snapshot: {market!r}")
+    if source_priority is None:
+        if config is None:
+            from alphasift.config import Config
+            config = Config.from_env()
+        source_priority = list(config.snapshot_source_priority)
+    return fetch_snapshot_with_fallback(
+        source_priority,
+        required_columns=required_columns,
+    )

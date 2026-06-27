@@ -185,10 +185,30 @@ def main():
     # quickstart
     qp = sub.add_parser(
         "quickstart",
-        help="一键演示：列出策略 → 跑一个无 LLM 的 dual_low → 输出排名摘要",
+        help="一键演示：列出策略 -> 跑一个无 LLM 的 dual_low -> 输出排名摘要",
     )
     qp.add_argument("--strategy", default="dual_low", help="演示用策略，默认 dual_low")
     qp.add_argument("--max-output", type=int, default=5, help="演示输出候选数")
+
+    # diagnose
+    sub.add_parser("diagnose", help="诊断数据获取问题，检查依赖包和网络连接")
+
+    # research
+    rp2 = sub.add_parser("research", help="用网络搜索研究单只股票")
+    rp2.add_argument("code", help="股票代码，如 000001")
+    rp2.add_argument("--name", default="", help="股票名称")
+    rp2.add_argument("--custom-query", action="append", default=None, help="自定义搜索查询，可重复")
+
+    # smart-screen
+    ssp = sub.add_parser("smart-screen", help="AI 智能选股：网络搜索 + 策略筛选 + LLM 分析")
+    ssp.add_argument("--strategy", default="balanced_alpha", help="基础策略名称")
+    ssp.add_argument("--requirements", "-r", default="", help="个人选股要求（自然语言描述）")
+    ssp.add_argument("--max-candidates", type=int, default=20, help="最大候选数")
+    ssp.add_argument("--max-research", type=int, default=10, help="最多网络研究几只股票")
+    ssp.add_argument("--no-news", action="store_true", help="不搜索新闻")
+    ssp.add_argument("--no-financials", action="store_true", help="不搜索财务数据")
+    ssp.add_argument("--custom-query", action="append", default=None, help="自定义搜索查询")
+    ssp.add_argument("--explain", action="store_true", help="输出可读摘要")
 
     args = parser.parse_args()
     _apply_env_file_args(args.env_file)
@@ -340,9 +360,133 @@ def main():
     elif args.command == "quickstart":
         _run_quickstart(strategy=args.strategy, max_output=args.max_output)
 
+    elif args.command == "diagnose":
+        _run_diagnose()
+
+    elif args.command == "research":
+        _run_research(args.code, name=args.name, custom_queries=args.custom_query)
+
+    elif args.command == "smart-screen":
+        _run_smart_screen(args)
+
     else:
         parser.print_help()
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# New commands: diagnose, research, smart-screen
+# ---------------------------------------------------------------------------
+
+
+def _run_diagnose() -> None:
+    """诊断数据获取问题。"""
+    from alphasift.data_manager import DataSourceManager
+
+    print("=" * 50)
+    print("AlphaSift 数据源诊断")
+    print("=" * 50)
+
+    manager = DataSourceManager()
+    report = manager.diagnose()
+    print(report)
+
+
+def _run_research(code: str, *, name: str = "", custom_queries: list[str] | None = None) -> None:
+    """用网络搜索研究单只股票。"""
+    from alphasift.web_research import WebResearcher
+
+    print("=" * 50)
+    print(f"网络研究: {code} {name}")
+    print("=" * 50)
+
+    researcher = WebResearcher()
+    research = researcher.research_stock(
+        code, name,
+        include_basic=True,
+        include_news=True,
+        include_financials=True,
+        include_analyst=True,
+        custom_queries=custom_queries,
+    )
+
+    context = research.to_context_text(max_chars=3000)
+    if context:
+        print(context)
+    else:
+        print("未找到相关信息。")
+        print("提示: 检查网络连接，或设置 BING_SEARCH_API_KEY / SERPER_API_KEY 获取更好的搜索结果。")
+
+
+def _run_smart_screen(args) -> None:
+    """AI 智能选股：网络搜索 + 策略筛选 + LLM 分析。"""
+    from alphasift.smart_researcher import SmartResearcher, SmartScreenRequest
+
+    print("=" * 50)
+    print("AlphaSift AI 智能选股")
+    print("=" * 50)
+
+    if args.requirements:
+        print(f"个人要求: {args.requirements}")
+    print(f"基础策略: {args.strategy}")
+    print()
+
+    request = SmartScreenRequest(
+        strategy_name=args.strategy,
+        personal_requirements=args.requirements,
+        max_candidates=args.max_candidates,
+        max_research_stocks=args.max_research,
+        include_news=not args.no_news,
+        include_financials=not args.no_financials,
+        custom_queries=args.custom_query or [],
+    )
+
+    researcher = SmartResearcher()
+    result = researcher.smart_screen(request)
+
+    if result.error:
+        print(f"错误: {result.error}")
+        print("运行 'alphasift diagnose' 检查数据源状态")
+        sys.exit(1)
+
+    # 输出结果
+    print(f"行情快照: {result.snapshot_count} 只股票")
+    print(f"策略筛选: {result.filtered_count} 只候选")
+    print(f"网络研究: {result.researched_count} 只")
+    print()
+
+    if result.market_sentiment:
+        print("市场情绪:")
+        print(result.market_sentiment)
+        print()
+
+    if result.picks:
+        print("选股结果:")
+        print(f"{'排名':<5}{'代码':<10}{'名称':<14}{'价格':<10}{'涨跌%':<10}{'PE':<10}{'PB':<8}{'成交额(万)':<14}")
+        print("-" * 80)
+        for pick in result.picks:
+            price = f"{pick['price']:.2f}" if pick['price'] else "-"
+            change = f"{pick['change_pct']:.2f}" if pick['change_pct'] else "-"
+            pe = f"{pick['pe_ratio']:.1f}" if pick['pe_ratio'] else "-"
+            pb = f"{pick['pb_ratio']:.2f}" if pick['pb_ratio'] else "-"
+            amount = f"{pick['amount']/10000:.0f}" if pick['amount'] else "-"
+            print(
+                f"{pick['rank']:<5}{pick['code']:<10}{pick['name'][:12]:<14}"
+                f"{price:<10}{change:<10}{pe:<10}{pb:<8}{amount:<14}"
+            )
+        print()
+
+    if result.research_context and args.explain:
+        print("研究摘要:")
+        print(result.research_context[:2000])
+    elif not result.picks:
+        print("未找到符合条件的股票。")
+        print("建议: 调整策略或放宽筛选条件。")
+
+
+# ---------------------------------------------------------------------------
+# Existing helper functions
+# ---------------------------------------------------------------------------
 
 
 def _run_quickstart(*, strategy: str = "dual_low", max_output: int = 5) -> None:
@@ -352,7 +496,7 @@ def _run_quickstart(*, strategy: str = "dual_low", max_output: int = 5) -> None:
     deterministic-looking summary that fits a single screen.
     """
     print("=" * 60)
-    print("AlphaSift Quickstart  ·  无 API key 演示")
+    print("AlphaSift Quickstart  -  无 API key 演示")
     print("=" * 60)
     print()
 
@@ -360,11 +504,11 @@ def _run_quickstart(*, strategy: str = "dual_low", max_output: int = 5) -> None:
     strategies = list_strategies(config.strategies_dir)
     print(f"[1/3] 可用策略 ({len(strategies)}):")
     for s in strategies:
-        marker = "→" if s.name == strategy else " "
+        marker = "->" if s.name == strategy else " "
         print(f"   {marker} {s.name:<20s} {s.display_name}")
     print()
 
-    print(f"[2/3] 执行 `{strategy}` 选股 (--no-llm, --no-post-analysis, top {max_output}) …")
+    print(f"[2/3] 执行 `{strategy}` 选股 (--no-llm, --no-post-analysis, top {max_output}) ...")
     try:
         result = screen(
             strategy,
@@ -379,8 +523,8 @@ def _run_quickstart(*, strategy: str = "dual_low", max_output: int = 5) -> None:
         sys.exit(2)
 
     print(
-        f"   全市场 {result.snapshot_count} 只 → 硬筛后 {result.after_filter_count} 只 "
-        f"→ 输出 {len(result.picks)} 只 (源: {result.snapshot_source})"
+        f"   全市场 {result.snapshot_count} 只 -> 硬筛后 {result.after_filter_count} 只 "
+        f"-> 输出 {len(result.picks)} 只 (源: {result.snapshot_source})"
     )
     print()
 
