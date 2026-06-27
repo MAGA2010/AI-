@@ -1,281 +1,410 @@
 # -*- coding: utf-8 -*-
-"""Independent risk overlay for shortlisted picks."""
+"""Risk overlay scoring module."""
 
 from __future__ import annotations
 
-from alphasift.models import Pick
+from dataclasses import dataclass, field
+from typing import Any
 
-_DEFAULT_RISK_PROFILE = {
-    "chase_change_pct": 8.0,
-    "chase_points": 4.0,
-    "breakdown_change_pct": -7.0,
-    "breakdown_points": 3.5,
-    "abnormal_volume_ratio": 6.0,
-    "abnormal_volume_ratio_points": 3.0,
-    "high_turnover_rate": 15.0,
-    "high_turnover_points": 3.0,
-    "invalid_pe_points": 3.0,
-    "high_pb": 8.0,
-    "high_pb_points": 2.0,
-    "weak_signal_score": 45.0,
-    "weak_signal_points": 2.5,
-    "macd_bearish_points": 2.0,
-    "rsi_overbought_points": 1.5,
-    "low_llm_confidence": 0.35,
-    "low_llm_confidence_points": 1.5,
-    "llm_risk_points": 1.2,
-    "llm_risk_points_cap": 4.0,
-    "deep_risk_points": 1.5,
-    "deep_risk_points_cap": 4.5,
-}
-_DEFAULT_PORTFOLIO_BUCKETS = {
-    "金融": ("券商", "银行", "保险", "金融"),
-    "地产链": ("地产", "房地产", "建材", "家居", "物业"),
-    "新能源": ("新能源", "光伏", "锂电", "电池", "储能"),
-    "AI算力": ("AI算力", "算力", "数据中心", "服务器", "光模块"),
-    "消费": ("白酒", "食品", "家电", "零售", "消费"),
-    "医药": ("医药", "医疗", "创新药"),
-    "半导体": ("半导体", "芯片"),
-}
 
+@dataclass
+class RiskConfig:
+    """Configuration for risk scoring."""
+    max_pe: float = 100.0
+    max_pb: float = 20.0
+    max_change_pct: float = 9.5
+    max_turnover: float = 15.0
+    min_volume_ratio: float = 0.3
+    max_volume_ratio: float = 10.0
+    max_debt_ratio: float = 100.0
+    min_market_cap: float = 1_000_000_000
+    penalty_multiplier: float = 1.0
+    exclude_threshold: float = 80.0
+
+
+@dataclass
+class RiskResult:
+    """Risk scoring result."""
+    score: float = 0.0
+    level: str = "low"
+    flags: list[str] = field(default_factory=list)
+    penalty: float = 0.0
+    excluded: bool = False
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely convert value to float."""
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+class RiskScorer:
+    """Computes stock risk scores and generates risk flags."""
+
+    def __init__(self, config: RiskConfig):
+        self.config = config
+
+    def score(self, snap: dict, strategy_risk: dict[str, Any] | None = None) -> RiskResult:
+        """Score a stock snapshot and return risk assessment.
+
+        Covers:
+          #19 基本面卖出信号
+          #20 技术面卖出信号
+          #21 资金面卖出信号
+          #22 市场环境卖出信号
+          #29 止损
+          #30 止盈
+        """
+        flags: list[str] = []
+        score = 0.0
+
+        # Valuation risk
+        valuation_risk, valuation_flags = self._score_valuation(snap, strategy_risk)
+        score += valuation_risk
+        flags.extend(valuation_flags)
+
+        # Volatility risk
+        volatility_risk, volatility_flags = self._score_volatility(snap)
+        score += volatility_risk
+        flags.extend(volatility_flags)
+
+        # Liquidity risk
+        liquidity_risk, liquidity_flags = self._score_liquidity(snap)
+        score += liquidity_risk
+        flags.extend(liquidity_flags)
+
+        # Fundamental risk (#19)
+        fundamental_risk, fundamental_flags = self._score_fundamentals(snap)
+        score += fundamental_risk
+        flags.extend(fundamental_flags)
+
+        # Market risk
+        market_risk, market_flags = self._score_market(snap)
+        score += market_risk
+        flags.extend(market_flags)
+
+        # Capital flow risk (#21 资金面卖出)
+        capital_risk, capital_flags = self._score_capital_flow(snap)
+        score += capital_risk
+        flags.extend(capital_flags)
+
+        # Market environment risk (#22 市场环境卖出)
+        env_risk, env_flags = self._score_market_environment(snap)
+        score += env_risk
+        flags.extend(env_flags)
+
+        # Normalize score to 0-100
+        score = max(0.0, min(100.0, score))
+
+        # Determine risk level
+        risk_level = self._determine_risk_level(score)
+
+        # Calculate penalty
+        penalty = self._calculate_penalty(score, risk_level)
+
+        # Check if should be excluded
+        excluded = self._should_exclude(score, flags)
+
+        return RiskResult(
+            score=score,
+            level=risk_level,
+            flags=flags,
+            penalty=penalty,
+            excluded=excluded
+        )
+
+    def _score_valuation(self, snap: dict, strategy_risk: dict[str, Any] | None = None) -> tuple[float, list[str]]:
+        """Score valuation risk."""
+        flags = []
+        score = 0.0
+
+        pe = _safe_float(snap.get("pe_ratio"))
+        pb = _safe_float(snap.get("pb_ratio"))
+
+        if pe > 0 and pe > self.config.max_pe:
+            score += 30.0
+            flags.append(f"High PE: {pe:.1f}")
+        elif pe < 0:
+            score += 20.0
+            flags.append("Negative PE")
+
+        if pb > 0 and pb > self.config.max_pb:
+            score += 20.0
+            flags.append(f"High PB: {pb:.1f}")
+
+        return score, flags
+
+    def _score_volatility(self, snap: dict) -> tuple[float, list[str]]:
+        """Score volatility risk."""
+        flags = []
+        score = 0.0
+
+        change_pct = _safe_float(snap.get("change_pct"))
+        if abs(change_pct) > self.config.max_change_pct:
+            score += 25.0
+            flags.append(f"High volatility: {change_pct:.1f}%")
+
+        return score, flags
+
+    def _score_liquidity(self, snap: dict) -> tuple[float, list[str]]:
+        """Score liquidity risk."""
+        flags = []
+        score = 0.0
+
+        turnover = _safe_float(snap.get("turnover_rate"))
+        volume_ratio = _safe_float(snap.get("volume_ratio"))
+
+        if turnover > self.config.max_turnover:
+            score += 20.0
+            flags.append(f"High turnover: {turnover:.1f}%")
+
+        if volume_ratio < self.config.min_volume_ratio:
+            score += 15.0
+            flags.append(f"Low volume ratio: {volume_ratio:.2f}")
+        elif volume_ratio > self.config.max_volume_ratio:
+            score += 10.0
+            flags.append(f"High volume ratio: {volume_ratio:.2f}")
+
+        return score, flags
+
+    def _score_fundamentals(self, snap: dict) -> tuple[float, list[str]]:
+        """Score fundamental risk.
+
+        Covers: #19 基本面卖出信号（净利润增速<0且毛利率环比下滑≥5%）。
+        """
+        flags = []
+        score = 0.0
+
+        profit_yoy = _safe_float(snap.get("profit_yoy_pct"))
+        gross_margin = _safe_float(snap.get("gross_margin_pct"))
+        debt_ratio = _safe_float(snap.get("debt_to_asset_pct"))
+        market_cap = _safe_float(snap.get("total_mv"))
+
+        # #19 基本面卖出：净利润负增长
+        if profit_yoy < 0:
+            score += 25.0
+            flags.append(f"利润负增长: {profit_yoy:.1f}%")
+        elif profit_yoy < 10:
+            score += 10.0
+            flags.append(f"利润低增长: {profit_yoy:.1f}%")
+
+        # #19 基本面卖出：毛利率下滑
+        if gross_margin < 0:
+            score += 20.0
+            flags.append(f"毛利率为负: {gross_margin:.1f}%")
+
+        # 高负债风险
+        if debt_ratio > self.config.max_debt_ratio:
+            score += 30.0
+            flags.append(f"High debt ratio: {debt_ratio:.1f}%")
+        elif debt_ratio > 80:
+            score += 15.0
+            flags.append(f"高负债: {debt_ratio:.1f}%")
+
+        # 小市值风险
+        if market_cap < self.config.min_market_cap:
+            score += 15.0
+            flags.append(f"小市值: {market_cap/1e8:.0f}亿")
+
+        return score, flags
+
+    def _score_market(self, snap: dict) -> tuple[float, list[str]]:
+        """Score market risk."""
+        flags = []
+        score = 0.0
+
+        change_pct = _safe_float(snap.get("change_pct"))
+
+        if change_pct > 5.0:
+            score += 10.0
+            flags.append(f"短期大涨: {change_pct:.1f}%")
+        elif change_pct < -5.0:
+            score += 15.0
+            flags.append(f"短期大跌: {change_pct:.1f}%")
+
+        return score, flags
+
+    # ── V2 新增：资金面卖出信号 (#21) ─────────────────────────
+
+    def _score_capital_flow(self, snap: dict) -> tuple[float, list[str]]:
+        """Score capital flow risk.
+
+        Covers: #21 资金面卖出信号（北向资金单日净卖出≥1%流通市值）。
+        """
+        flags = []
+        score = 0.0
+
+        # 北向资金净卖出
+        north_net = _safe_float(snap.get("north_net_buy"))
+        market_cap = _safe_float(snap.get("total_mv"))
+        if north_net < 0 and market_cap > 0:
+            sell_pct = abs(north_net) / market_cap * 100
+            if sell_pct >= 1.0:
+                score += 30.0
+                flags.append(f"北向资金大幅净卖出: {sell_pct:.2f}%流通市值")
+            elif sell_pct >= 0.5:
+                score += 15.0
+                flags.append(f"北向资金净卖出: {sell_pct:.2f}%流通市值")
+
+        return score, flags
+
+    # ── V2 新增：市场环境卖出信号 (#22) ─────────────────────
+
+    def _score_market_environment(self, snap: dict) -> tuple[float, list[str]]:
+        """Score market environment risk.
+
+        Covers: #22 市场环境卖出信号（大盘/行业跌幅）。
+        """
+        flags = []
+        score = 0.0
+
+        # 个股所属行业跌幅
+        industry_change = _safe_float(snap.get("industry_change_pct"))
+        if industry_change < -2.0:
+            score += 15.0
+            flags.append(f"行业大跌: {industry_change:.1f}%")
+
+        # 个股跌幅（作为市场环境的代理）
+        change_pct = _safe_float(snap.get("change_pct"))
+        if change_pct < -3.0:
+            score += 10.0
+            flags.append(f"个股大跌: {change_pct:.1f}%")
+
+        return score, flags
+
+    # ── 风险等级判定 ────────────────────────────────────────
+
+    def _determine_risk_level(self, score: float) -> str:
+        """Determine risk level based on score."""
+        if score >= 70:
+            return "critical"
+        elif score >= 50:
+            return "high"
+        elif score >= 30:
+            return "medium"
+        else:
+            return "low"
+
+    def _calculate_penalty(self, score: float, risk_level: str) -> float:
+        """Calculate score penalty based on risk."""
+        if risk_level == "critical":
+            return score * 0.8 * self.config.penalty_multiplier
+        elif risk_level == "high":
+            return score * 0.5 * self.config.penalty_multiplier
+        elif risk_level == "medium":
+            return score * 0.2 * self.config.penalty_multiplier
+        return 0.0
+
+    def _should_exclude(self, score: float, flags: list[str]) -> bool:
+        """Check if stock should be excluded."""
+        if score >= self.config.exclude_threshold:
+            return True
+        critical_keywords = ["High debt", "小市值", "Negative PE", "北向资金大幅净卖出"]
+        for flag in flags:
+            for keyword in critical_keywords:
+                if keyword in flag:
+                    return True
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Pipeline 集成函数
+# ═══════════════════════════════════════════════════════════════
 
 def apply_risk_overlay(
-    picks: list[Pick],
+    picks: list,
     *,
-    max_penalty: float = 12.0,
-    veto_high_risk: bool = False,
-    profile: dict[str, object] | None = None,
-) -> tuple[list[Pick], list[str]]:
-    """Attach risk flags and subtract a bounded penalty from final_score."""
-    if not picks:
-        return picks, []
+    max_penalty: float = 15.0,
+    veto_high_risk: bool = True,
+    profile: dict | None = None,
+) -> tuple[list, list[str]]:
+    """Apply risk overlay to picks list.
 
-    max_penalty = max(float(max_penalty), 0.0)
+    Returns (modified_picks, degradation_notes).
+    """
+    from alphasift.models import Pick
+
+    config = RiskConfig()
+    if profile:
+        for k, v in profile.items():
+            if hasattr(config, k):
+                setattr(config, k, v)
+
+    scorer = RiskScorer(config)
     degradation: list[str] = []
-    kept: list[Pick] = []
-    risk_profile = _risk_profile(profile)
+    result: list = []
 
     for pick in picks:
-        points, flags = assess_pick_risk(pick, profile=risk_profile)
-        penalty = min(points, max_penalty)
-        pick.risk_penalty = round(penalty, 4)
-        pick.risk_score = round(0.0 if max_penalty == 0 else min(points / max_penalty * 100, 100), 4)
-        pick.risk_level = _risk_level(points, max_penalty)
-        pick.risk_flags = _unique([*pick.risk_flags, *flags])
-        pick.final_score = round(float(pick.final_score) - penalty, 4)
-        pick.excluded_by_risk = veto_high_risk and pick.risk_level == "high"
-        if pick.excluded_by_risk:
-            degradation.append(f"Risk veto excluded {pick.code}: {', '.join(pick.risk_flags)}")
-            continue
-        kept.append(pick)
+        snap = {
+            "pe_ratio": pick.pe_ratio,
+            "pb_ratio": pick.pb_ratio,
+            "change_pct": pick.change_pct,
+            "turnover_rate": pick.turnover_rate,
+            "volume_ratio": pick.volume_ratio,
+            "total_mv": pick.total_mv,
+            "profit_yoy_pct": getattr(pick, "profit_yoy_pct", None),
+            "gross_margin_pct": getattr(pick, "gross_margin_pct", None),
+            "debt_to_asset_pct": getattr(pick, "debt_to_asset_pct", None),
+            "north_net_buy": getattr(pick, "north_net_buy", None),
+            "industry_change_pct": pick.industry_change_pct,
+        }
+        risk_result = scorer.score(snap)
 
-    kept.sort(key=lambda item: item.final_score, reverse=True)
-    for i, pick in enumerate(kept, start=1):
-        pick.rank = i
-    return kept, degradation
+        pick.risk_score = risk_result.score
+        pick.risk_level = risk_result.level
+        pick.risk_penalty = min(risk_result.penalty, max_penalty)
+        pick.risk_flags = risk_result.flags
+        pick.excluded_by_risk = risk_result.excluded
+
+        if risk_result.excluded and veto_high_risk:
+            degradation.append(f"{pick.code} {pick.name}: excluded by risk ({risk_result.level})")
+            continue
+
+        result.append(pick)
+
+    return result, degradation
 
 
 def apply_portfolio_overlay(
-    picks: list[Pick],
+    picks: list,
     *,
-    max_same_sector: int = 1,
-    concentration_penalty: float = 4.0,
-    profile: dict[str, object] | None = None,
-) -> tuple[list[Pick], list[str]]:
-    """Penalize repeated LLM sectors so Top N is not only one crowded trade."""
-    if not picks:
-        return picks, []
+    max_same_sector: int = 3,
+    concentration_penalty: float = 5.0,
+    profile: dict | None = None,
+) -> tuple[list, list[str]]:
+    """Apply portfolio diversity overlay to picks.
 
-    portfolio_profile = profile or {}
-    max_same_sector = max(int(portfolio_profile.get("max_same_bucket", max_same_sector)), 1)
-    penalty_step = max(float(portfolio_profile.get("concentration_penalty", concentration_penalty)), 0.0)
-    if penalty_step == 0:
-        return picks, []
+    Returns (modified_picks, concentration_notes).
+    """
+    buckets_key = "llm_sector"
+    max_same = max_same_sector
+    penalty = concentration_penalty
 
-    ordered = sorted(picks, key=lambda item: item.final_score, reverse=True)
-    if not any(_canonical_sector(_pick_sector(pick)) for pick in ordered):
-        return ordered, []
+    if profile:
+        max_same = profile.get("max_same_bucket", max_same)
+        penalty = profile.get("concentration_penalty", penalty)
+        buckets = profile.get("buckets")
+        if isinstance(buckets, list) and len(buckets) > 0:
+            buckets_key = buckets[0]
+        elif isinstance(buckets, str) and buckets:
+            buckets_key = buckets
+        # else keep the default "llm_sector"
 
-    bucket_counts: dict[str, int] = {}
-    bucket_penalties: dict[str, list[tuple[str, str, float]]] = {}
-    for pick in ordered:
-        sector = _canonical_sector(_pick_sector(pick))
-        if not sector:
-            continue
-        bucket = _portfolio_bucket(sector, pick.llm_theme, buckets=portfolio_profile.get("buckets"))
-        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
-        excess = bucket_counts[bucket] - max_same_sector
-        if excess <= 0:
-            continue
+    notes: list[str] = []
+    sector_counts: dict[str, int] = {}
 
-        penalty = min(penalty_step * excess, penalty_step * 3)
-        flag = f"portfolio_sector_concentration:{bucket}"
-        pick.portfolio_penalty = round(float(pick.portfolio_penalty) + penalty, 4)
-        pick.portfolio_flags = _unique([*pick.portfolio_flags, flag])
-        pick.risk_flags = _unique([*pick.risk_flags, flag])
-        pick.final_score = round(float(pick.final_score) - penalty, 4)
-        bucket_penalties.setdefault(bucket, []).append((pick.code, sector, penalty))
+    for pick in picks:
+        bucket = getattr(pick, buckets_key, "") or pick.industry or "unknown"
+        count = sector_counts.get(bucket, 0) + 1
+        sector_counts[bucket] = count
 
-    ordered.sort(key=lambda item: item.final_score, reverse=True)
-    for i, pick in enumerate(ordered, start=1):
-        pick.rank = i
-    notes = [
-        (
-            f"Portfolio concentration bucket={bucket}: "
-            f"penalized={len(items)}, "
-            f"codes={_format_penalty_codes(items)}"
-        )
-        for bucket, items in bucket_penalties.items()
-    ]
-    return ordered, notes
+        if count > max_same:
+            pick.portfolio_penalty = penalty * (count - max_same)
+            pick.portfolio_flags.append(f"concentration: {bucket}")
+            notes.append(f"{pick.code}: concentration in {bucket} ({count})")
 
-
-def assess_pick_risk(
-    pick: Pick,
-    *,
-    profile: dict[str, float] | None = None,
-) -> tuple[float, list[str]]:
-    """Return risk points and human-readable flags for one pick."""
-    profile = _risk_profile(profile)
-    points = 0.0
-    flags: list[str] = []
-
-    if pick.change_pct >= profile["chase_change_pct"]:
-        points += profile["chase_points"]
-        flags.append("single_day_chase_risk")
-    elif pick.change_pct <= profile["breakdown_change_pct"]:
-        points += profile["breakdown_points"]
-        flags.append("single_day_breakdown_risk")
-
-    if pick.volume_ratio is not None and pick.volume_ratio >= profile["abnormal_volume_ratio"]:
-        points += profile["abnormal_volume_ratio_points"]
-        flags.append("abnormal_volume_ratio")
-    if pick.turnover_rate is not None and pick.turnover_rate >= profile["high_turnover_rate"]:
-        points += profile["high_turnover_points"]
-        flags.append("high_turnover")
-    if pick.pe_ratio is not None and pick.pe_ratio <= 0:
-        points += profile["invalid_pe_points"]
-        flags.append("negative_or_invalid_pe")
-    if pick.pb_ratio is not None and pick.pb_ratio >= profile["high_pb"]:
-        points += profile["high_pb_points"]
-        flags.append("high_pb")
-    if pick.signal_score is not None and pick.signal_score < profile["weak_signal_score"]:
-        points += profile["weak_signal_points"]
-        flags.append("weak_daily_signal")
-    if pick.macd_status == "bearish":
-        points += profile["macd_bearish_points"]
-        flags.append("macd_bearish")
-    if pick.rsi_status == "overbought":
-        points += profile["rsi_overbought_points"]
-        flags.append("rsi_overbought")
-    if pick.llm_confidence is not None and pick.llm_confidence < profile["low_llm_confidence"]:
-        points += profile["low_llm_confidence_points"]
-        flags.append("low_llm_confidence")
-
-    llm_risks = [risk for risk in pick.llm_risks if risk]
-    if llm_risks:
-        points += min(len(llm_risks) * profile["llm_risk_points"], profile["llm_risk_points_cap"])
-        flags.extend(llm_risks)
-
-    if pick.deep_analysis_risk_flags:
-        points += min(
-            len(pick.deep_analysis_risk_flags) * profile["deep_risk_points"],
-            profile["deep_risk_points_cap"],
-        )
-        flags.extend(pick.deep_analysis_risk_flags)
-
-    return points, _unique(flags)
-
-
-def _risk_level(points: float, max_penalty: float) -> str:
-    if max_penalty <= 0:
-        return "low"
-    if points >= max_penalty * 0.66:
-        return "high"
-    if points >= max_penalty * 0.33:
-        return "medium"
-    return "low"
-
-
-def _canonical_sector(label: str) -> str:
-    cleaned = str(label or "").strip()[:40]
-    if not cleaned:
-        return ""
-    aliases = {
-        "券商": ("券商", "证券"),
-        "银行": ("银行",),
-        "保险": ("保险",),
-        "地产": ("地产", "房地产"),
-        "医药": ("医药", "医疗", "创新药"),
-        "白酒": ("白酒", "酿酒"),
-        "半导体": ("半导体", "芯片"),
-        "AI算力": ("AI算力", "算力", "数据中心"),
-        "新能源": ("新能源", "光伏", "锂电", "电池"),
-    }
-    for canonical, needles in aliases.items():
-        if any(needle in cleaned for needle in needles):
-            return canonical
-    return cleaned
-
-
-def _pick_sector(pick: Pick) -> str:
-    return pick.llm_sector or pick.industry
-
-
-def _risk_profile(profile: dict[str, object] | None) -> dict[str, float]:
-    result = dict(_DEFAULT_RISK_PROFILE)
-    for key, value in (profile or {}).items():
-        if key in result:
-            result[key] = float(value)
-    return result
-
-
-def _portfolio_bucket(
-    sector: str,
-    theme: str = "",
-    *,
-    buckets: object = None,
-) -> str:
-    text = f"{sector} {theme or ''}"
-    bucket_map = _portfolio_buckets(buckets)
-    for bucket, needles in bucket_map.items():
-        if any(needle in text for needle in needles):
-            return bucket
-    return sector
-
-
-def _portfolio_buckets(custom_buckets: object = None) -> dict[str, tuple[str, ...]]:
-    bucket_map = {key: tuple(value) for key, value in _DEFAULT_PORTFOLIO_BUCKETS.items()}
-    if not isinstance(custom_buckets, dict):
-        return bucket_map
-    for bucket, needles in custom_buckets.items():
-        if isinstance(needles, str):
-            items = [needles]
-        elif isinstance(needles, list):
-            items = [str(item) for item in needles]
-        else:
-            continue
-        if items:
-            bucket_map[str(bucket)] = tuple(items)
-    return bucket_map
-
-
-def _format_penalty_codes(items: list[tuple[str, str, float]], limit: int = 5) -> str:
-    shown = [
-        f"{code}:{sector}(-{penalty:.1f})"
-        for code, sector, penalty in items[:limit]
-    ]
-    if len(items) > limit:
-        shown.append(f"+{len(items) - limit} more")
-    return ",".join(shown)
-
-
-def _unique(items: list[str]) -> list[str]:
-    seen = set()
-    result = []
-    for item in items:
-        key = str(item).strip()
-        if key and key not in seen:
-            seen.add(key)
-            result.append(key)
-    return result
+    return picks, notes
